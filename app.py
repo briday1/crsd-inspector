@@ -154,7 +154,7 @@ def compute_amplitude(inputs):
         return {"amplitude": None}
     
     try:
-        if signal_data is not None and hasattr(signal_data, '__len__'):
+        if hasattr(signal_data, '__len__'):
             amplitude = np.abs(signal_data)
             return {"amplitude": amplitude}
         else:
@@ -171,7 +171,7 @@ def compute_phase(inputs):
         return {"phase": None}
     
     try:
-        if signal_data is not None and hasattr(signal_data, '__len__'):
+        if hasattr(signal_data, '__len__'):
             phase = np.angle(signal_data)
             return {"phase": phase}
         else:
