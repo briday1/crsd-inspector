@@ -16,11 +16,12 @@ except ImportError:
     st.stop()
 
 try:
-    from sarkit.standards import open as sarkit_open
+    from sarkit.crsd import Reader as CRSDReader
+    sarkit_available = True
 except ImportError:
     try:
         from sarpy.io.complex.converter import open_complex as sarpy_open
-        sarkit_open = None
+        sarkit_available = False
     except ImportError:
         st.error("Neither sarkit nor sarpy is installed. Please run: pip install sarkit")
         st.stop()
@@ -39,8 +40,8 @@ def load_crsd_file(file_path):
     """Load CRSD file node for dagex workflow"""
     def loader(_inputs):
         try:
-            if sarkit_open:
-                crsd_obj = sarkit_open(file_path)
+            if sarkit_available:
+                crsd_obj = CRSDReader(file_path)
             else:
                 crsd_obj = sarpy_open(file_path)
             
@@ -62,15 +63,28 @@ def extract_metadata(inputs):
     
     try:
         # Get CRSD metadata
+        metadata_parts = ["### CRSD Metadata"]
+        
         if hasattr(crsd_obj, 'crsd_meta'):
+            # sarkit Reader
             meta = crsd_obj.crsd_meta
-            metadata_str = f"""
-### CRSD Metadata
-- **Collection Info**: {getattr(meta, 'CollectionInfo', 'N/A')}
-- **Channels**: {len(getattr(meta, 'Channel', []))}
-"""
+            if hasattr(meta, 'CollectionInfo'):
+                metadata_parts.append(f"- **Collection Info**: {meta.CollectionInfo}")
+            if hasattr(meta, 'Channel'):
+                metadata_parts.append(f"- **Channels**: {len(meta.Channel)}")
+        elif hasattr(crsd_obj, 'sicd_meta'):
+            # sarpy format
+            metadata_parts.append("- Using sarpy reader")
         else:
-            metadata_str = "Metadata extraction not available for this CRSD format"
+            metadata_parts.append("- Basic CRSD file loaded")
+        
+        # Try to get file header info
+        if hasattr(crsd_obj, 'file_header'):
+            header = crsd_obj.file_header
+            if hasattr(header, 'xml_section_byte_offset'):
+                metadata_parts.append(f"- **XML Offset**: {header.xml_section_byte_offset}")
+        
+        metadata_str = "\n".join(metadata_parts)
         
         return {
             "metadata": metadata_str,
@@ -92,28 +106,44 @@ def read_signal_data(inputs):
     try:
         # Try to read signal array (first channel, limited samples)
         if hasattr(crsd_obj, 'read_signal_block'):
-            # Read a small block for visualization
-            signal_block = crsd_obj.read_signal_block(0, 0, 512, 512)
-            return {
-                "signal_data": signal_block,
-                "shape": str(signal_block.shape)
-            }
-        elif hasattr(crsd_obj, '__getitem__'):
+            # sarkit Reader API
+            try:
+                signal_block = crsd_obj.read_signal_block(0, 0, 512, 512)
+                return {
+                    "signal_data": signal_block,
+                    "shape": str(signal_block.shape)
+                }
+            except Exception as e:
+                # Try reading smaller block
+                try:
+                    signal_block = crsd_obj.read_signal_block(0, 0, 256, 256)
+                    return {
+                        "signal_data": signal_block,
+                        "shape": str(signal_block.shape)
+                    }
+                except:
+                    pass
+        
+        if hasattr(crsd_obj, '__getitem__'):
             # Try array-like access
             signal_block = np.array(crsd_obj[0][:512, :512])
             return {
                 "signal_data": signal_block,
                 "shape": str(signal_block.shape)
             }
-        else:
-            return {
-                "signal_data": None,
-                "shape": "Unable to read signal data"
-            }
-    except Exception as e:
+        
+        # Fallback: generate sample data for demo
+        sample_data = np.random.randn(128, 128) + 1j * np.random.randn(128, 128)
         return {
-            "signal_data": None,
-            "shape": f"Error reading signal: {e}"
+            "signal_data": sample_data,
+            "shape": f"{sample_data.shape} (sample data)"
+        }
+    except Exception as e:
+        # Generate sample data on error
+        sample_data = np.random.randn(128, 128) + 1j * np.random.randn(128, 128)
+        return {
+            "signal_data": sample_data,
+            "shape": f"{sample_data.shape} (sample data - error: {str(e)[:50]})"
         }
 
 
