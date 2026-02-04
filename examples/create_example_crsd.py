@@ -4,7 +4,7 @@ Script to create a synthetic example CRSD file for testing
 """
 import numpy as np
 from sarkit.crsd import Writer, Metadata
-from datetime import datetime
+from datetime import datetime, timezone
 import os
 
 def create_example_crsd(output_path="example.crsd"):
@@ -53,7 +53,7 @@ def create_example_crsd(output_path="example.crsd"):
     
     # Set timeline
     meta.Global = Metadata.GlobalType()
-    meta.Global.CollectStart = datetime.utcnow().isoformat() + "Z"
+    meta.Global.CollectStart = datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
     meta.Global.CollectDuration = 1.0  # seconds
     meta.Global.TxTime1 = 0.0
     meta.Global.TxTime2 = 1.0

@@ -10,6 +10,9 @@ import tempfile
 import os
 from datetime import datetime
 
+# Constants
+EPSILON = 1e-10  # Small value to prevent log(0) and division by zero
+
 try:
     import dagex
     from dagex import Graph
@@ -250,8 +253,11 @@ def compute_signal_statistics(inputs):
                 "imag_std": float(np.std(signal_data.imag)),
             },
             "quality": {
-                "snr_estimate_db": 20 * np.log10(np.mean(amplitude) / (np.std(amplitude) + 1e-10)),
-                "dynamic_range_db": 20 * np.log10(np.max(amplitude) / (np.min(amplitude) + 1e-10)),
+                # Simplified SNR estimation: ratio of mean to std deviation
+                # Note: This is an approximation and may not represent true SNR
+                # as it doesn't account for actual noise floor measurements
+                "snr_estimate_db": 20 * np.log10(np.mean(amplitude) / (np.std(amplitude) + EPSILON)),
+                "dynamic_range_db": 20 * np.log10(np.max(amplitude) / (np.min(amplitude) + EPSILON)),
             }
         }
         
@@ -305,7 +311,7 @@ def create_crsd_workflow(file_path):
 
 def create_plotly_amplitude_plot(amplitude):
     """Create interactive Plotly amplitude plot"""
-    amp_db = 20 * np.log10(np.abs(amplitude) + 1e-10)
+    amp_db = 20 * np.log10(np.abs(amplitude) + EPSILON)
     
     fig = go.Figure(data=go.Heatmap(
         z=amp_db,
@@ -387,14 +393,14 @@ def create_signal_profiles(amplitude):
     
     # Azimuth profile
     fig.add_trace(
-        go.Scatter(y=20 * np.log10(amplitude[:, mid_col] + 1e-10), mode='lines', name="Azimuth"),
+        go.Scatter(y=20 * np.log10(amplitude[:, mid_col] + EPSILON), mode='lines', name="Azimuth"),
         row=1, col=1
     )
     
     # Range profile
     fig.add_trace(
         go.Scatter(x=np.arange(amplitude.shape[1]), 
-                   y=20 * np.log10(amplitude[mid_row, :] + 1e-10), 
+                   y=20 * np.log10(amplitude[mid_row, :] + EPSILON), 
                    mode='lines', name="Range"),
         row=1, col=2
     )
@@ -534,7 +540,7 @@ if file_to_process:
                         
                         # Download option
                         if st.button("💾 Download Amplitude Data"):
-                            amp_db = 20 * np.log10(np.abs(amp) + 1e-10)
+                            amp_db = 20 * np.log10(np.abs(amp) + EPSILON)
                             np.save("amplitude_db.npy", amp_db)
                             st.success("Saved to amplitude_db.npy")
                     else:
