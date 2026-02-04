@@ -6,9 +6,12 @@ import numpy as np
 from dagex import Graph
 
 
-def create_workflow():
+def create_workflow(signal_data=None):
     """Create signal quality assessment workflow"""
     graph = Graph()
+    
+    def provide_data(_inputs):
+        return {"signal_data": signal_data}
     
     def compute_quality_metrics(inputs):
         signal = inputs.get("signal_data")
@@ -77,6 +80,13 @@ def create_workflow():
         }
         
         return {"report": report}
+    
+    graph.add(
+        provide_data,
+        label="Provide Data",
+        inputs=[],
+        outputs=[("signal_data", "signal_data")]
+    )
     
     graph.add(
         compute_quality_metrics,

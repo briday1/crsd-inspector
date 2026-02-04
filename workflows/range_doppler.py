@@ -6,9 +6,12 @@ import numpy as np
 from dagex import Graph
 
 
-def create_workflow():
+def create_workflow(signal_data=None):
     """Create range-doppler processing workflow"""
     graph = Graph()
+    
+    def provide_data(_inputs):
+        return {"signal_data": signal_data}
     
     def compute_range_doppler(inputs):
         signal = inputs.get("signal_data")
@@ -49,6 +52,13 @@ def create_workflow():
         stats["peak_range_bin"] = int(peak_idx[1])
         
         return {"rd_stats": stats}
+    
+    graph.add(
+        provide_data,
+        label="Provide Data",
+        inputs=[],
+        outputs=[("signal_data", "signal_data")]
+    )
     
     graph.add(
         compute_range_doppler,
