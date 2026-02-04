@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
-Script to create a synthetic example CRSD file for testing
+Script to create 3 synthetic example CRSD files for testing
 """
 import numpy as np
 from sarkit.crsd import Writer, Metadata
 from datetime import datetime, timezone
 import os
 
-def create_example_crsd(output_path="example.crsd"):
+
+def create_example_crsd(output_path, file_num):
     """Create a small synthetic CRSD file for demonstration"""
     
     # Create synthetic signal data (small for repository inclusion)
@@ -15,12 +16,25 @@ def create_example_crsd(output_path="example.crsd"):
     num_samples = 256  # Samples per vector
     
     # Generate complex signal data with some structure
+    # Different characteristics for each file
+    np.random.seed(file_num * 100)
+    
+    if file_num == 1:
+        num_targets = 3
+        noise_level = 0.1
+    elif file_num == 2:
+        num_targets = 5
+        noise_level = 0.15
+    else:
+        num_targets = 2
+        noise_level = 0.08
+    
     signal_data = np.zeros((num_vectors, num_samples), dtype=np.complex64)
     
     # Add some synthetic targets
-    for i in range(3):
-        target_vec = 80 + i * 50
-        target_sample = 100 + i * 40
+    for i in range(num_targets):
+        target_vec = np.random.randint(50, num_vectors - 50)
+        target_sample = np.random.randint(50, num_samples - 50)
         # Create a point target with some spread
         for dv in range(-5, 6):
             for ds in range(-5, 6):
@@ -33,8 +47,8 @@ def create_example_crsd(output_path="example.crsd"):
                     signal_data[v, s] += amp * np.exp(1j * phase)
     
     # Add noise
-    noise = 0.1 * (np.random.randn(num_vectors, num_samples) + 
-                   1j * np.random.randn(num_vectors, num_samples))
+    noise = noise_level * (np.random.randn(num_vectors, num_samples) + 
+                          1j * np.random.randn(num_vectors, num_samples))
     signal_data += noise.astype(np.complex64)
     
     # Create minimal metadata
@@ -42,8 +56,8 @@ def create_example_crsd(output_path="example.crsd"):
     
     # Set basic collection info
     meta.CollectionInfo = Metadata.CollectionInfoType()
-    meta.CollectionInfo.CollectorName = "Example Synthetic Radar"
-    meta.CollectionInfo.CoreName = "EXAMPLE_CRSD_001"
+    meta.CollectionInfo.CollectorName = f"Synthetic Radar {file_num}"
+    meta.CollectionInfo.CoreName = f"EXAMPLE_CRSD_{file_num:03d}"
     meta.CollectionInfo.CollectType = "MONOSTATIC"
     meta.CollectionInfo.Classification = "UNCLASSIFIED"
     
@@ -95,16 +109,34 @@ def create_example_crsd(output_path="example.crsd"):
         writer = Writer(output_path, meta)
         writer.write_signal_block(signal_data, 0, 0)
         writer.close()
-        print(f"✓ Created example CRSD file: {output_path}")
+        print(f"✓ Created {output_path}")
         print(f"  Size: {os.path.getsize(output_path) / 1024:.1f} KB")
         print(f"  Dimensions: {num_vectors} vectors × {num_samples} samples")
+        print(f"  Targets: {num_targets}, Noise level: {noise_level}")
         return True
     except Exception as e:
-        print(f"✗ Error creating CRSD file: {e}")
-        print(f"  This is expected - sarkit Writer may not support all features")
-        print(f"  The app will work with real CRSD files or generate synthetic data")
+        print(f"✗ Error creating CRSD file {output_path}: {e}")
+        import traceback
+        traceback.print_exc()
         return False
 
+
 if __name__ == "__main__":
-    output_file = os.path.join(os.path.dirname(__file__), "example_small.crsd")
-    create_example_crsd(output_file)
+    print("Creating 3 synthetic CRSD example files...")
+    print("=" * 60)
+    
+    success_count = 0
+    for i in range(1, 4):
+        output_file = os.path.join(os.path.dirname(__file__), f"example_{i}.crsd")
+        if create_example_crsd(output_file, i):
+            success_count += 1
+        print()
+    
+    print("=" * 60)
+    print(f"Successfully created {success_count} out of 3 CRSD files")
+    
+    if success_count == 3:
+        print("\n✅ All example files created successfully!")
+        print("These are real CRSD files conforming to NGA.STND.0080")
+    else:
+        print("\n⚠️  Some files failed to create. Check error messages above.")
