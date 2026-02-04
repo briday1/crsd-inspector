@@ -9,6 +9,8 @@ import plotly.express as px
 from plotly.subplots import make_subplots
 import tempfile
 import os
+import sys
+import importlib.util
 from datetime import datetime
 from pathlib import Path
 import glob
@@ -35,7 +37,7 @@ except ImportError:
         st.stop()
 
 
-st.set_page_config(page_title="CRSD Inspector", page_icon="📡", layout="wide")
+st.set_page_config(page_title="CRSD Inspector", page_icon="", layout="wide")
 
 # Initialize session state
 if 'crsd_files' not in st.session_state:
@@ -48,11 +50,77 @@ if 'comparison_mode' not in st.session_state:
     st.session_state.comparison_mode = False
 if 'comparison_file_index' not in st.session_state:
     st.session_state.comparison_file_index = None
+if 'selected_workflow' not in st.session_state:
+    st.session_state.selected_workflow = None
+if 'workflows' not in st.session_state:
+    st.session_state.workflows = {}
 
-st.title("📡 CRSD Inspector - Multi-File Browser with Comparison")
+st.title(" CRSD Inspector - Multi-File Browser with Comparison")
 st.markdown("""
 Browse directories of CRSD files, compare multiple files side-by-side, and analyze differences.
 """)
+
+
+def discover_workflows():
+    """Discover available workflow modules"""
+    workflows = {}
+    workflows_dir = os.path.join(os.path.dirname(__file__), "workflows")
+    
+    if not os.path.isdir(workflows_dir):
+        return workflows
+    
+    # Find all Python files in workflows directory
+    workflow_files = glob.glob(os.path.join(workflows_dir, "*.py"))
+    
+    for filepath in workflow_files:
+        filename = os.path.basename(filepath)
+        if filename.startswith("_") or filename == "README.md":
+            continue
+        
+        module_name = filename[:-3]  # Remove .py
+        
+        try:
+            # Load the module
+            spec = importlib.util.spec_from_file_location(module_name, filepath)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            
+            # Check for required functions/variables
+            if hasattr(module, 'create_workflow') and hasattr(module, 'format_results'):
+                workflow_name = getattr(module, 'WORKFLOW_NAME', module_name)
+                workflow_desc = getattr(module, 'WORKFLOW_DESCRIPTION', '')
+                
+                workflows[workflow_name] = {
+                    'module': module,
+                    'name': workflow_name,
+                    'description': workflow_desc,
+                    'filepath': filepath
+                }
+        except Exception as e:
+            st.warning(f"Failed to load workflow {filename}: {e}")
+    
+    return workflows
+
+
+def execute_workflow(workflow_module, signal_data, metadata):
+    """Execute a workflow and return formatted results"""
+    try:
+        # Create the workflow graph with data
+        graph = workflow_module.create_workflow(signal_data=signal_data)
+        dag = graph.build()
+        
+        # Execute
+        context = dag.execute(True, 4)
+        
+        # Format results
+        results = workflow_module.format_results(context)
+        
+        return results, context
+    except Exception as e:
+        import traceback
+        st.error(f"Workflow execution failed: {e}")
+        st.code(traceback.format_exc())
+        return None, None
 
 
 def scan_directory_for_crsd(directory_path):
@@ -101,25 +169,44 @@ def load_and_process_file(file_path):
         return st.session_state.file_cache[file_path]
     
     try:
-        # Load file
-        if sarkit_available:
-            crsd_obj = CRSDReader(file_path)
-        else:
-            crsd_obj = sarpy_open(file_path)
+        # Try to load as real CRSD file first
+        signal_block = None
+        crsd_obj = None
         
-        # Read signal data
-        try:
-            if hasattr(crsd_obj, 'read_signal_block'):
-                signal_block = crsd_obj.read_signal_block(0, 0, 256, 256)
-            elif hasattr(crsd_obj, '__getitem__'):
-                signal_block = np.array(crsd_obj[0][:256, :256])
+        # Check if it's a custom simple CRSD file (our examples)
+        if os.path.exists(file_path) and file_path.endswith('.crsd'):
+            try:
+                with open(file_path, 'rb') as f:
+                    magic = f.read(4)
+                    if magic == b'CRSD':
+                        # Our custom format
+                        import struct
+                        rows, cols = struct.unpack('<II', f.read(8))
+                        data = f.read()
+                        signal_block = np.frombuffer(data, dtype=np.complex64).reshape(rows, cols)
+            except:
+                pass
+        
+        # If not loaded yet, try sarkit
+        if signal_block is None:
+            if sarkit_available:
+                crsd_obj = CRSDReader(file_path)
             else:
-                # Generate synthetic based on filename
+                crsd_obj = sarpy_open(file_path)
+            
+            # Read signal data
+            try:
+                if hasattr(crsd_obj, 'read_signal_block'):
+                    signal_block = crsd_obj.read_signal_block(0, 0, 256, 256)
+                elif hasattr(crsd_obj, '__getitem__'):
+                    signal_block = np.array(crsd_obj[0][:256, :256])
+                else:
+                    # Generate synthetic based on filename
+                    seed = hash(os.path.basename(file_path)) % (2**32)
+                    signal_block = generate_synthetic_signal(256, 256, seed=seed)
+            except:
                 seed = hash(os.path.basename(file_path)) % (2**32)
                 signal_block = generate_synthetic_signal(256, 256, seed=seed)
-        except:
-            seed = hash(os.path.basename(file_path)) % (2**32)
-            signal_block = generate_synthetic_signal(256, 256, seed=seed)
         
         # Compute statistics
         amplitude = np.abs(signal_block)
@@ -292,23 +379,23 @@ def create_plotly_phase_plot(phase, title="Signal Phase"):
 
 
 # Sidebar for directory/file selection
-st.sidebar.header("📁 File Selection")
+st.sidebar.header("File Selection")
 
 # File source selection
 file_source = st.sidebar.radio(
     "Source",
-    ["Browse Directory", "Upload Files", "Generate Examples"],
+    ["Browse Directory", "Upload Files"],
     index=0
 )
 
 if file_source == "Browse Directory":
     directory_path = st.sidebar.text_input(
         "Directory Path",
-        value=".",
+        value="./examples",
         help="Enter path to directory containing CRSD files"
     )
     
-    if st.sidebar.button("🔍 Scan Directory"):
+    if st.sidebar.button("Scan Directory"):
         if os.path.isdir(directory_path):
             files = scan_directory_for_crsd(directory_path)
             if files:
@@ -343,19 +430,37 @@ elif file_source == "Upload Files":
         st.session_state.file_cache = {}
         st.sidebar.success(f"Uploaded {len(file_paths)} file(s)")
 
-elif file_source == "Generate Examples":
-    num_examples = st.sidebar.slider("Number of example files", 2, 10, 3)
+# Workflow selection
+st.sidebar.markdown("---")
+st.sidebar.subheader("Workflow Selection")
+
+# Discover workflows if not already done
+if not st.session_state.workflows:
+    st.session_state.workflows = discover_workflows()
+
+if st.session_state.workflows:
+    workflow_names = ["None (Default View)"] + list(st.session_state.workflows.keys())
+    selected_workflow_name = st.sidebar.selectbox(
+        "Select Workflow",
+        workflow_names,
+        index=0,
+        help="Choose a processing workflow to apply to the selected CRSD file"
+    )
     
-    if st.sidebar.button("Generate Synthetic Files"):
-        st.session_state.crsd_files = [f"synthetic_{i+1}.crsd" for i in range(num_examples)]
-        st.session_state.current_file_index = 0
-        st.session_state.file_cache = {}
-        st.sidebar.success(f"Generated {num_examples} synthetic files")
+    if selected_workflow_name != "None (Default View)":
+        st.session_state.selected_workflow = st.session_state.workflows[selected_workflow_name]
+        # Show workflow description
+        if st.session_state.selected_workflow['description']:
+            st.sidebar.caption(st.session_state.selected_workflow['description'])
+    else:
+        st.session_state.selected_workflow = None
+else:
+    st.sidebar.info("No workflows found in workflows/ directory")
 
 # File list and selection
 if st.session_state.crsd_files:
     st.sidebar.markdown("---")
-    st.sidebar.subheader(f"📋 Files ({len(st.session_state.crsd_files)})")
+    st.sidebar.subheader(f"Files ({len(st.session_state.crsd_files)})")
     
     # File selector
     for idx, file_path in enumerate(st.session_state.crsd_files):
@@ -366,7 +471,8 @@ if st.session_state.crsd_files:
         with col1:
             is_current = idx == st.session_state.current_file_index
             button_type = "primary" if is_current else "secondary"
-            if st.button(f"{'▶ ' if is_current else '  '}{filename[:30]}", 
+            prefix = ">" if is_current else " "
+            if st.button(f"{prefix} {filename[:30]}", 
                         key=f"file_{idx}", 
                         type=button_type,
                         use_container_width=True):
@@ -374,7 +480,7 @@ if st.session_state.crsd_files:
                 st.rerun()
         
         with col2:
-            if st.button("📊", key=f"compare_{idx}", help="Compare with this file"):
+            if st.button("Compare", key=f"compare_{idx}", help="Compare with this file"):
                 st.session_state.comparison_mode = True
                 st.session_state.comparison_file_index = idx
                 st.rerun()
@@ -384,18 +490,18 @@ if st.session_state.crsd_files:
     col1, col2, col3 = st.sidebar.columns(3)
     
     with col1:
-        if st.button("⬅️ Prev"):
+        if st.button("< Prev"):
             if st.session_state.current_file_index > 0:
                 st.session_state.current_file_index -= 1
                 st.rerun()
     
     with col2:
-        if st.button("🔄 Refresh"):
+        if st.button("Refresh"):
             st.session_state.file_cache = {}
             st.rerun()
     
     with col3:
-        if st.button("Next ➡️"):
+        if st.button("Next >"):
             if st.session_state.current_file_index < len(st.session_state.crsd_files) - 1:
                 st.session_state.current_file_index += 1
                 st.rerun()
@@ -403,7 +509,7 @@ if st.session_state.crsd_files:
     # Comparison mode toggle
     st.sidebar.markdown("---")
     if st.session_state.comparison_mode:
-        if st.sidebar.button("❌ Exit Comparison Mode"):
+        if st.sidebar.button("Exit Comparison Mode"):
             st.session_state.comparison_mode = False
             st.session_state.comparison_file_index = None
             st.rerun()
@@ -419,7 +525,7 @@ if st.session_state.crsd_files:
     # Display mode
     if st.session_state.comparison_mode and st.session_state.comparison_file_index is not None:
         # Comparison mode
-        st.header("🔍 File Comparison Mode")
+        st.header("File Comparison Mode")
         
         comparison_file = st.session_state.crsd_files[st.session_state.comparison_file_index]
         
@@ -434,7 +540,7 @@ if st.session_state.crsd_files:
             st.info(f"**File 2:** {comparison_data['metadata']['filename']}")
         
         # Tabs for comparison
-        tabs = st.tabs(["📊 Statistics Comparison", "📈 Amplitude Comparison", "🌊 Phase Comparison", "📉 Difference Analysis"])
+        tabs = st.tabs(["Statistics Comparison", "Amplitude Comparison", "Phase Comparison", "Difference Analysis"])
         
         with tabs[0]:
             st.subheader("Statistics Comparison")
@@ -506,7 +612,7 @@ if st.session_state.crsd_files:
     
     else:
         # Single file view
-        st.header(f"📄 {current_data['metadata']['filename']}")
+        st.header(f"{current_data['metadata']['filename']}")
         
         # Quick stats
         col1, col2, col3, col4 = st.columns(4)
@@ -519,18 +625,69 @@ if st.session_state.crsd_files:
         with col4:
             st.metric("SNR (dB)", f"{current_data['statistics']['quality']['snr_estimate_db']:.1f}")
         
-        # Tabs for visualization
-        tabs = st.tabs(["📈 Amplitude", "🌊 Phase", "📊 Statistics", "📋 All Files Overview"])
+        # Check if workflow is selected
+        workflow_results = None
+        if st.session_state.selected_workflow:
+            with st.spinner(f"Executing workflow: {st.session_state.selected_workflow['name']}..."):
+                workflow_results, workflow_context = execute_workflow(
+                    st.session_state.selected_workflow['module'],
+                    current_data['signal_data'],
+                    current_data['metadata']
+                )
         
-        with tabs[0]:
+        # Tabs for visualization
+        tab_names = ["Amplitude", "Phase", "Statistics", "All Files Overview"]
+        if workflow_results:
+            tab_names.insert(0, "Workflow Results")
+        
+        tabs = st.tabs(tab_names)
+        
+        tab_idx = 0
+        
+        # Workflow Results Tab
+        if workflow_results:
+            with tabs[tab_idx]:
+                st.subheader(f"Results: {st.session_state.selected_workflow['name']}")
+                
+                # Display tables
+                if workflow_results.get("tables"):
+                    for table_data in workflow_results["tables"]:
+                        st.markdown(f"**{table_data['title']}**")
+                        st.json(table_data['data'])
+                
+                # Display plots
+                if workflow_results.get("plots"):
+                    for plot_spec in workflow_results["plots"]:
+                        if plot_spec['type'] == 'heatmap':
+                            fig = go.Figure(data=go.Heatmap(
+                                z=plot_spec['data'],
+                                colorscale='Viridis',
+                                colorbar=dict(title=plot_spec.get('colorbar_title', ''))
+                            ))
+                            fig.update_layout(
+                                title=plot_spec['title'],
+                                xaxis_title=plot_spec.get('xlabel', ''),
+                                yaxis_title=plot_spec.get('ylabel', ''),
+                                height=500
+                            )
+                            st.plotly_chart(fig, use_container_width=True)
+                
+                # Display text
+                if workflow_results.get("text"):
+                    for text in workflow_results["text"]:
+                        st.markdown(text)
+            
+            tab_idx += 1
+        
+        with tabs[tab_idx]:
             fig = create_plotly_amplitude_plot(current_data['amplitude'])
             st.plotly_chart(fig, use_container_width=True)
         
-        with tabs[1]:
+        with tabs[tab_idx + 1]:
             fig = create_plotly_phase_plot(current_data['phase'])
             st.plotly_chart(fig, use_container_width=True)
         
-        with tabs[2]:
+        with tabs[tab_idx + 2]:
             st.subheader("Detailed Statistics")
             col1, col2 = st.columns(2)
             
@@ -597,17 +754,17 @@ if st.session_state.crsd_files:
             st.plotly_chart(fig, use_container_width=True)
 
 else:
-    st.info("👈 Please select a file source from the sidebar to begin")
+    st.info("Please select a file source from the sidebar to begin")
     
     st.markdown("""
     ### Features
     
-    - **📁 Directory Browsing**: Scan entire directories for CRSD files
-    - **📊 Multi-File Comparison**: Compare files side-by-side with difference visualization
-    - **🔄 Quick Navigation**: Previous/Next buttons for fast file switching
-    - **📈 Overview Mode**: See statistics for all files at once
-    - **🎨 Interactive Visualizations**: Plotly-based zoom, pan, and hover
-    - **💾 Smart Caching**: Files loaded once and cached for performance
+    - **Directory Browsing**: Scan entire directories for CRSD files
+    - **Multi-File Comparison**: Compare files side-by-side with difference visualization
+    - **Quick Navigation**: Previous/Next buttons for fast file switching
+    - **Overview Mode**: See statistics for all files at once
+    - **Interactive Visualizations**: Plotly-based zoom, pan, and hover
+    - **Smart Caching**: Files loaded once and cached for performance
     """)
 
 # Footer
