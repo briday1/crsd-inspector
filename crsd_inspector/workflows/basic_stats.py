@@ -14,7 +14,7 @@ WORKFLOW_DESCRIPTION = "Compute basic amplitude and phase statistics"
 def run_workflow(signal_data, metadata=None):
     """Run the basic statistics workflow and return formatted results"""
     # Create and execute graph
-    graph = _create_workflow(signal_data)
+    graph = _create_graph(signal_data)
     dag = graph.build()
     context = dag.execute(True, 4)
     
@@ -22,7 +22,7 @@ def run_workflow(signal_data, metadata=None):
     return _format_results(context)
 
 
-def _create_workflow(signal_data=None):
+def _create_graph(signal_data=None):
     """Create basic statistics workflow"""
     graph = Graph()
     
