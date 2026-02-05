@@ -4,6 +4,7 @@ Performs FFT processing to generate range-doppler map
 """
 import numpy as np
 from dagex import Graph
+import plotly.graph_objects as go
 
 
 def create_workflow(signal_data=None):
@@ -100,14 +101,18 @@ def format_results(context):
     # Add range-doppler plot
     rd_db = context.get("rd_db")
     if rd_db is not None:
-        results["plots"].append({
-            "type": "heatmap",
-            "title": "Range-Doppler Map",
-            "data": rd_db,
-            "xlabel": "Range Bin",
-            "ylabel": "Doppler Bin",
-            "colorbar_title": "Magnitude (dB)"
-        })
+        fig = go.Figure(data=go.Heatmap(
+            z=rd_db,
+            colorscale='Viridis',
+            colorbar=dict(title="Magnitude (dB)")
+        ))
+        fig.update_layout(
+            title="Range-Doppler Map",
+            xaxis_title="Range Bin",
+            yaxis_title="Doppler Bin",
+            height=500
+        )
+        results["plots"].append(fig)
     
     return results
 

@@ -4,6 +4,7 @@ Comprehensive quality metrics for CRSD data
 """
 import numpy as np
 from dagex import Graph
+import plotly.graph_objects as go
 
 
 def create_workflow(signal_data=None):
@@ -129,6 +130,26 @@ def format_results(context):
             "data": report
         })
     
+    # Add amplitude histogram
+    amplitude = context.get("amp")
+    if amplitude is not None:
+        # Create histogram data
+        hist, edges = np.histogram(amplitude.flatten(), bins=100)
+        bin_centers = (edges[:-1] + edges[1:]) / 2
+        
+        fig = go.Figure(data=go.Bar(
+            x=bin_centers,
+            y=hist
+        ))
+        fig.update_layout(
+            title="Amplitude Distribution",
+            xaxis_title="Amplitude",
+            yaxis_title="Count",
+            height=500
+        )
+        results["plots"].append(fig)
+    
+    return results
     return results
 
 
