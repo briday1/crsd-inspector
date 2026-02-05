@@ -7,7 +7,22 @@ from dagex import Graph
 import plotly.graph_objects as go
 
 
-def create_workflow(signal_data=None):
+WORKFLOW_NAME = "Basic Statistics"
+WORKFLOW_DESCRIPTION = "Compute basic amplitude and phase statistics"
+
+
+def run_workflow(signal_data, metadata=None):
+    """Run the basic statistics workflow and return formatted results"""
+    # Create and execute graph
+    graph = _create_workflow(signal_data)
+    dag = graph.build()
+    context = dag.execute(True, 4)
+    
+    # Format and return results
+    return _format_results(context)
+
+
+def _create_workflow(signal_data=None):
     """Create basic statistics workflow"""
     graph = Graph()
     
@@ -74,7 +89,7 @@ def create_workflow(signal_data=None):
     return graph
 
 
-def format_results(context):
+def _format_results(context):
     """Format workflow results for display"""
     results = {
         "tables": [],
@@ -146,8 +161,3 @@ def format_results(context):
         results["plots"].append(fig)
     
     return results
-
-
-# Workflow metadata
-WORKFLOW_NAME = "Basic Statistics"
-WORKFLOW_DESCRIPTION = "Compute basic amplitude and phase statistics"

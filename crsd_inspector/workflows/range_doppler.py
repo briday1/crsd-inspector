@@ -7,7 +7,22 @@ from dagex import Graph
 import plotly.graph_objects as go
 
 
-def create_workflow(signal_data=None):
+WORKFLOW_NAME = "Range-Doppler Processing"
+WORKFLOW_DESCRIPTION = "2D FFT processing to generate range-doppler map"
+
+
+def run_workflow(signal_data, metadata=None):
+    """Run the range-doppler workflow and return formatted results"""
+    # Create and execute graph
+    graph = _create_workflow(signal_data)
+    dag = graph.build()
+    context = dag.execute(True, 4)
+    
+    # Format and return results
+    return _format_results(context)
+
+
+def _create_workflow(signal_data=None):
     """Create range-doppler processing workflow"""
     graph = Graph()
     
@@ -82,7 +97,7 @@ def create_workflow(signal_data=None):
     return graph
 
 
-def format_results(context):
+def _format_results(context):
     """Format workflow results for display"""
     results = {
         "tables": [],
@@ -115,8 +130,3 @@ def format_results(context):
         results["plots"].append(fig)
     
     return results
-
-
-# Workflow metadata
-WORKFLOW_NAME = "Range-Doppler Processing"
-WORKFLOW_DESCRIPTION = "2D FFT processing to generate range-doppler map"

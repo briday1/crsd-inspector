@@ -13,7 +13,7 @@ A comprehensive radar signal analysis toolkit for inspecting and visualizing CRS
 - **Modular Processing**: Self-contained workflow modules for different analyses
 - **Pluggable Design**: Workflows discover and register automatically
 - **Clean Separation**: App.py is a pure dispatcher - all logic in workflows
-- **dagex Integration**: DAG execution engine for complex processing pipelines
+- **Simple Interface**: Workflows run code and return results - no framework required
 
 ### Analysis Workflows
 - **Basic Statistics**: Comprehensive signal statistics with amplitude/phase heatmaps
@@ -112,29 +112,39 @@ crsd-inspector/
 
 ### Workflow Pattern
 
-Each workflow module is self-contained:
+Each workflow module is self-contained and requires only a single function:
 
 ```python
 # workflows/my_workflow.py
 WORKFLOW_NAME = "My Workflow"
 WORKFLOW_DESCRIPTION = "What it does"
 
-def create_workflow(signal_data):
-    """Build dagex Graph with processing nodes"""
-    graph = Graph()
-    # Add nodes for computation
-    return graph
-
-def format_results(context):
-    """Format execution results for display"""
+def run_workflow(signal_data, metadata=None):
+    """Run analysis and return formatted results"""
+    # Process the signal data
+    result_value = compute_something(signal_data)
+    
+    # Create visualizations
+    fig = create_plot(result_value)
+    
+    # Return results dictionary
     return {
-        'tables': [...],      # Pandas DataFrames
-        'plots': [fig1, ...], # Plotly Figure objects
-        'text': [...]         # Markdown strings
+        'tables': [{
+            'title': 'Results',
+            'data': {'metric': result_value}
+        }],
+        'plots': [fig],        # Plotly Figure objects
+        'text': ["## Analysis complete"]  # Markdown strings
     }
 ```
 
-The app discovers and loads workflows automatically - just drop a new module in `workflows/`.
+**Key Points:**
+- Workflows can use any processing approach (simple functions, dagex graphs, etc.)
+- Must return a dictionary with `tables`, `plots`, and `text` keys
+- Tables are dicts with `'title'` and `'data'` (dict of metric: value pairs)
+- Plots are Plotly Figure objects
+- Text entries are markdown strings
+- The app discovers and loads workflows automatically - just drop a new module in `workflows/`
 
 ### CRSD Generator
 
@@ -168,12 +178,12 @@ stats = generator.generate()
 ## Dependencies
 
 - **streamlit** (>=1.31.0): Web framework for interactive applications
-- **dagex** (>=2026.1): DAG execution engine for workflow orchestration
 - **sarkit** (>=1.0.0): Library for reading/writing CRSD files (NGA.STND.0080)
 - **numpy** (>=1.24.0): Numerical computations
 - **plotly** (>=5.18.0): Interactive visualization library
 - **matplotlib** (>=3.7.0): Additional plotting support
 - **lxml** (>=4.9.0): XML processing for CRSD metadata
+- **dagex** (>=2026.1): Optional - DAG execution engine (used internally by example workflows)
 
 All dependencies are automatically installed when you `pip install` the package.
 
@@ -208,13 +218,22 @@ crsd-inspector generate --output-dir ./my-test-files
 The package uses a modular workflow architecture. To add a new analysis:
 
 1. Create `crsd_inspector/workflows/my_analysis.py`
-2. Implement `create_workflow(signal_data)` and `format_results(context)`
-3. The app will auto-discover and load it
+2. Define `WORKFLOW_NAME` and `WORKFLOW_DESCRIPTION` constants
+3. Implement `run_workflow(signal_data, metadata=None)` that returns results dict
+4. The app will auto-discover and load it
 
-Workflows return standardized results:
-- **tables**: List of pandas DataFrames (displayed as tables)
-- **plots**: List of Plotly Figure objects (rendered interactive)
-- **text**: List of markdown strings (displayed as text)
+Workflow return format:
+```python
+{
+    'tables': [
+        {
+            'title': 'Statistics',
+            'data': {'Mean': 1.23, 'StdDev': 0.45}  # dict of metric: value
+        }
+    ],
+    'plots': [fig1, fig2],  # List of Plotly Figure objects
+    'text': ["## Header", "Analysis description"]  # List of markdown strings
+}
 
 ## License
 
