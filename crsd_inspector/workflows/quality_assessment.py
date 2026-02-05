@@ -7,7 +7,22 @@ from dagex import Graph
 import plotly.graph_objects as go
 
 
-def create_workflow(signal_data=None):
+WORKFLOW_NAME = "Signal Quality Assessment"
+WORKFLOW_DESCRIPTION = "Comprehensive quality metrics including SNR, dynamic range, and clipping detection"
+
+
+def run_workflow(signal_data, metadata=None):
+    """Run the quality assessment workflow and return formatted results"""
+    # Create and execute graph
+    graph = _create_workflow(signal_data)
+    dag = graph.build()
+    context = dag.execute(True, 4)
+    
+    # Format and return results
+    return _format_results(context)
+
+
+def _create_workflow(signal_data=None):
     """Create signal quality assessment workflow"""
     graph = Graph()
     
@@ -106,7 +121,7 @@ def create_workflow(signal_data=None):
     return graph
 
 
-def format_results(context):
+def _format_results(context):
     """Format workflow results for display"""
     results = {
         "tables": [],
@@ -150,9 +165,4 @@ def format_results(context):
         results["plots"].append(fig)
     
     return results
-    return results
 
-
-# Workflow metadata
-WORKFLOW_NAME = "Signal Quality Assessment"
-WORKFLOW_DESCRIPTION = "Comprehensive quality metrics including SNR, dynamic range, and clipping detection"

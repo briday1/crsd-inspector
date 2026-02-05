@@ -71,7 +71,7 @@ def discover_workflows():
             spec.loader.exec_module(module)
             
             # Check for required functions/variables
-            if hasattr(module, 'create_workflow') and hasattr(module, 'format_results'):
+            if hasattr(module, 'run_workflow'):
                 workflow_name = getattr(module, 'WORKFLOW_NAME', module_name)
                 workflow_desc = getattr(module, 'WORKFLOW_DESCRIPTION', '')
                 
@@ -90,22 +90,14 @@ def discover_workflows():
 def execute_workflow(workflow_module, signal_data, metadata):
     """Execute a workflow and return formatted results"""
     try:
-        # Create the workflow graph with data
-        graph = workflow_module.create_workflow(signal_data=signal_data)
-        dag = graph.build()
-        
-        # Execute
-        context = dag.execute(True, 4)
-        
-        # Format results
-        results = workflow_module.format_results(context)
-        
-        return results, context
+        # Run the workflow (internally handles graph creation and formatting)
+        results = workflow_module.run_workflow(signal_data=signal_data, metadata=metadata)
+        return results
     except Exception as e:
         import traceback
         st.error(f"Workflow execution failed: {e}")
         st.code(traceback.format_exc())
-        return None, None
+        return None
 
 
 def scan_directory_for_crsd(directory_path):
@@ -288,22 +280,7 @@ if st.session_state.crsd_files:
     st.sidebar.markdown("---")
     st.sidebar.subheader(f"Files ({len(st.session_state.crsd_files)})")
     
-    # File selector - using selectbox for better scalability
-    file_options = [os.path.basename(f) for f in st.session_state.crsd_files]
-    current_selection = st.sidebar.selectbox(
-        "Select file:",
-        options=range(len(file_options)),
-        index=st.session_state.current_file_index,
-        format_func=lambda x: file_options[x],
-        key="file_selector"
-    )
-    
-    if current_selection != st.session_state.current_file_index:
-        st.session_state.current_file_index = current_selection
-        st.rerun()
-    
     # Navigation buttons
-    st.sidebar.markdown("---")
     col1, col2, col3 = st.sidebar.columns(3)
     
     with col1:
@@ -322,6 +299,19 @@ if st.session_state.crsd_files:
             if st.session_state.current_file_index < len(st.session_state.crsd_files) - 1:
                 st.session_state.current_file_index += 1
                 st.rerun()
+    
+    # File selector - using selectbox for better scalability
+    file_options = [os.path.basename(f) for f in st.session_state.crsd_files]
+    current_selection = st.sidebar.selectbox(
+        "Select file:",
+        options=range(len(file_options)),
+        index=st.session_state.current_file_index,
+        format_func=lambda x: file_options[x]
+    )
+    
+    if current_selection != st.session_state.current_file_index:
+        st.session_state.current_file_index = current_selection
+        st.rerun()
 
 # Main content
 if st.session_state.crsd_files:
@@ -338,7 +328,7 @@ if st.session_state.crsd_files:
         workflow_results = None
         if st.session_state.selected_workflow:
             with st.spinner(f"Executing workflow..."):
-                workflow_results, workflow_context = execute_workflow(
+                workflow_results = execute_workflow(
                     st.session_state.selected_workflow['module'],
                     current_data['signal_data'],
                     current_data['metadata']
