@@ -9,7 +9,6 @@ import tempfile
 import os
 import sys
 import importlib.util
-import struct
 from datetime import datetime
 from pathlib import Path
 import glob
@@ -19,6 +18,12 @@ try:
     from dagex import Graph
 except ImportError:
     st.error("dagex is not installed. Please run: pip install dagex")
+    st.stop()
+
+try:
+    import sarkit.crsd as crsd
+except ImportError:
+    st.error("sarkit is required. Please run: pip install sarkit")
     st.stop()
 
 st.set_page_config(page_title="CRSD Inspector", layout="wide")
@@ -122,16 +127,47 @@ def load_and_process_file(file_path):
     
     try:
         signal_block = None
+        tx_wfm = None
+        channel_ids = []
+        sample_rate_hz = None
+        prf_hz = None
         
-        # Check if it's a custom simple CRSD file (our examples)
-        if os.path.exists(file_path) and file_path.endswith('.crsd'):
-            with open(file_path, 'rb') as f:
-                magic = f.read(4)
-                if magic == b'CRSD':
-                    # Our custom format: magic(4) + rows(4) + cols(4) + complex64 data
-                    rows, cols = struct.unpack('<II', f.read(8))
-                    data = f.read()
-                    signal_block = np.frombuffer(data, dtype=np.complex64).reshape(rows, cols)
+        # Load CRSD file with sarkit
+        with open(file_path, 'rb') as f:
+                reader = crsd.Reader(f)
+                
+                # Get channel IDs
+                root = reader.metadata.xmltree.getroot()
+                channels = root.findall('.//{http://api.nsgreg.nga.mil/schema/crsd/1.0}Channel')
+                channel_ids = [ch.find('{http://api.nsgreg.nga.mil/schema/crsd/1.0}ChId').text 
+                              for ch in channels] if channels else []
+                
+                # Load first channel (or only channel)
+                if channel_ids:
+                    signal_block = reader.read_signal(channel_ids[0])
+                elif hasattr(reader, 'read_signal_block'):
+                    signal_block = reader.read_signal_block(0, 0, 256, 256)
+                
+                # Try to load TX waveform
+                try:
+                    tx_wfm_array = reader.read_support_array("TX_WFM")
+                    tx_wfm = np.asarray(tx_wfm_array[0, :], dtype=np.complex64)
+                except:
+                    pass
+                
+                # Extract radar parameters from metadata
+                try:
+                    radar_params = root.find('.//{http://api.nsgreg.nga.mil/schema/crsd/1.0}RadarParameters')
+                    if radar_params is not None:
+                        sample_rate = radar_params.find('.//{http://api.nsgreg.nga.mil/schema/crsd/1.0}SampleRate')
+                        if sample_rate is not None:
+                            sample_rate_hz = float(sample_rate.text)
+                        
+                        prf = radar_params.find('.//{http://api.nsgreg.nga.mil/schema/crsd/1.0}PRF')
+                        if prf is not None:
+                            prf_hz = float(prf.text)
+                except:
+                    pass
         
         if signal_block is None:
             raise ValueError(f"Unable to read file format: {file_path}")
@@ -141,10 +177,19 @@ def load_and_process_file(file_path):
             "filename": os.path.basename(file_path),
             "file_size_mb": os.path.getsize(file_path) / (1024 * 1024),
             "shape": signal_block.shape,
+            "num_channels": len(channel_ids) if channel_ids else 1,
+            "channel_ids": channel_ids if channel_ids else ["CHAN1"],
         }
+        
+        # Add radar parameters if available
+        if sample_rate_hz:
+            metadata["sample_rate_hz"] = sample_rate_hz
+        if prf_hz:
+            metadata["prf_hz"] = prf_hz
         
         result = {
             "signal_data": signal_block,
+            "tx_wfm": tx_wfm,
             "metadata": metadata,
             "file_path": file_path
         }
