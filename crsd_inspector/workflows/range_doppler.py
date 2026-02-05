@@ -14,7 +14,7 @@ WORKFLOW_DESCRIPTION = "2D FFT processing to generate range-doppler map"
 def run_workflow(signal_data, metadata=None):
     """Run the range-doppler workflow and return formatted results"""
     # Create and execute graph
-    graph = _create_workflow(signal_data)
+    graph = _create_graph(signal_data)
     dag = graph.build()
     context = dag.execute(True, 4)
     
@@ -22,7 +22,7 @@ def run_workflow(signal_data, metadata=None):
     return _format_results(context)
 
 
-def _create_workflow(signal_data=None):
+def _create_graph(signal_data=None):
     """Create range-doppler processing workflow"""
     graph = Graph()
     
