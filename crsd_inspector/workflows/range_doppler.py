@@ -26,21 +26,18 @@ def perform_range_doppler_processing(signal_data, tx_wfm, sample_rate_hz, prf_hz
     num_pulses, num_samples = signal_data.shape
     
     # Step 1: Pulse compression via frequency domain matched filtering
-    compressed = np.zeros_like(signal_data)
-    
     # Prepare matched filter in frequency domain
     matched_filter_time = np.conj(tx_wfm[::-1])
     matched_filter_freq = np.fft.fft(matched_filter_time, n=num_samples)
     
-    for p in range(num_pulses):
-        # Transform to frequency domain
-        signal_freq = np.fft.fft(signal_data[p, :])
-        
-        # Multiply in frequency domain (equivalent to convolution in time domain)
-        compressed_freq = signal_freq * matched_filter_freq
-        
-        # Transform back to time domain
-        compressed[p, :] = np.fft.ifft(compressed_freq)
+    # FFT along fast-time (range) dimension for all pulses at once
+    signal_freq = np.fft.fft(signal_data, axis=1)
+    
+    # Multiply in frequency domain (broadcasting matched filter across pulses)
+    compressed_freq = signal_freq * matched_filter_freq[None, :]
+    
+    # Transform back to time domain
+    compressed = np.fft.ifft(compressed_freq, axis=1)
     
     # Step 2: Doppler processing (FFT across slow time)
     range_doppler = np.fft.fftshift(np.fft.fft(compressed, axis=0), axes=0)
