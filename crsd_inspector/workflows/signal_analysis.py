@@ -393,8 +393,6 @@ def _format_results(context):
     if quality_report:
         workflow.add_table("Quality Assessment", quality_report)
     
-    #   workflow.add_plot(iq_fig)
-    
     # Tables at the end
     amplitude_stats = context.get("amplitude_stats")
     if amplitude_stats:
