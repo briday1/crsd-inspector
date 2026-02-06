@@ -16,7 +16,7 @@ import plotly.graph_objects as go
 import sarkit.crsd as crsd
 
 # Import workflows
-from crsd_inspector.workflows import signal_analysis, range_doppler
+from crsd_inspector.workflows import signal_analysis, range_doppler, pulse_extraction
 
 
 # Initialize Dash app with dark Bootstrap theme
@@ -153,6 +153,7 @@ app.index_string = '''
 WORKFLOWS = {
     "Signal Analysis": signal_analysis,
     "Range-Doppler Processing": range_doppler,
+    "Pulse Extraction": pulse_extraction,
 }
 
 # App layout - 3 column design
@@ -336,36 +337,42 @@ def update_options_panel(file_path, workflow_name):
             ),
         ]
         
-        # Add workflow-specific options
-        if workflow_name == "Range-Doppler Processing":
-            options.append(html.Hr())
-            options.append(html.Label("Range Windowing", className="fw-bold mb-2"))
-            options.append(dcc.Dropdown(
-                id={'type': 'workflow-param', 'name': 'range-window-type'},
-                options=[
-                    {"label": "None", "value": "none"},
-                    {"label": "Hamming", "value": "hamming"},
-                    {"label": "Hann", "value": "hann"},
-                    {"label": "Blackman", "value": "blackman"},
-                    {"label": "Kaiser", "value": "kaiser"}
-                ],
-                value="none",
-                className="mb-3"
-            ))
-            
-            options.append(html.Label("Doppler Windowing", className="fw-bold mb-2"))
-            options.append(dcc.Dropdown(
-                id={'type': 'workflow-param', 'name': 'doppler-window-type'},
-                options=[
-                    {"label": "None", "value": "none"},
-                    {"label": "Hamming", "value": "hamming"},
-                    {"label": "Hann", "value": "hann"},
-                    {"label": "Blackman", "value": "blackman"},
-                    {"label": "Kaiser", "value": "kaiser"}
-                ],
-                value="none",
-                className="mb-3"
-            ))
+        # Add workflow-specific options from PARAMS
+        if workflow_name:
+            workflow_module = WORKFLOWS.get(workflow_name)
+            if workflow_module and hasattr(workflow_module, 'PARAMS'):
+                options.append(html.Hr())
+                options.append(html.H6("Workflow Parameters", className="mb-3"))
+                
+                for param_name, param_config in workflow_module.PARAMS.items():
+                    options.append(html.Label(param_config['label'], className="fw-bold mb-2"))
+                    
+                    param_type = param_config.get('type', 'number')
+                    
+                    if param_type == 'dropdown':
+                        options.append(dcc.Dropdown(
+                            id={'type': 'workflow-param', 'name': param_name},
+                            options=param_config.get('options', []),
+                            value=param_config.get('default'),
+                            className="mb-3"
+                        ))
+                    elif param_type == 'number':
+                        options.append(dcc.Input(
+                            id={'type': 'workflow-param', 'name': param_name},
+                            type='number',
+                            value=param_config.get('default'),
+                            min=param_config.get('min'),
+                            max=param_config.get('max'),
+                            step=param_config.get('step'),
+                            className="form-control mb-3"
+                        ))
+                    elif param_type == 'text':
+                        options.append(dcc.Input(
+                            id={'type': 'workflow-param', 'name': param_name},
+                            type='text',
+                            value=param_config.get('default', ''),
+                            className="form-control mb-3"
+                        ))
         
         # File info
         file_size = os.path.getsize(file_path) / 1024 / 1024  # MB

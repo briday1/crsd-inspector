@@ -35,6 +35,12 @@ class ClutterModel(Enum):
     LOG_NORMAL = "lognormal"  # Volume clutter
 
 
+class DataFormat(Enum):
+    """Signal data format"""
+    PULSE_STACKED = "pulse_stacked"  # Pre-stacked: (num_pulses x samples_per_pulse)
+    CONTINUOUS = "continuous"  # Continuous: (1 x total_samples) with embedded pulses
+
+
 @dataclass
 class RadarTarget:
     """Point target with motion"""
@@ -124,6 +130,9 @@ class SceneConfig:
     multipath_delay_s: float = 1e-6
     multipath_attenuation_db: float = 10.0
     
+    # Data format
+    data_format: 'DataFormat' = None  # Will default to PULSE_STACKED in __post_init__
+    
     # Output
     output_file: str = "synthetic_radar.crsd"
     verbose: bool = False
@@ -137,6 +146,10 @@ class SceneConfig:
         if self.clutter is None:
             # Default: disable clutter
             self.clutter = ClutterConfig(enabled=False)
+        
+        if self.data_format is None:
+            # Default to pulse-stacked for backward compatibility
+            self.data_format = DataFormat.PULSE_STACKED
 
 
 @dataclass

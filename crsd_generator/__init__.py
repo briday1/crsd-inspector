@@ -3,7 +3,7 @@ CRSD Generator - Synthetic radar data generation
 """
 
 from .api import CRSDGenerator, RadarTarget, ClutterConfig, SceneConfig
-from .models import WaveformType, TargetModel, ClutterModel
+from .models import WaveformType, TargetModel, ClutterModel, DataFormat
 
 __all__ = [
     "CRSDGenerator",
@@ -13,4 +13,5 @@ __all__ = [
     "WaveformType",
     "TargetModel",
     "ClutterModel",
+    "DataFormat",
 ]

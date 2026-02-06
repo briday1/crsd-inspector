@@ -18,6 +18,34 @@ workflow = Workflow(
     description="Matched filtering and Doppler FFT to generate range-doppler maps"
 )
 
+# Workflow parameters
+PARAMS = {
+    'range-window-type': {
+        'label': 'Range Windowing',
+        'type': 'dropdown',
+        'default': 'none',
+        'options': [
+            {"label": "None", "value": "none"},
+            {"label": "Hamming", "value": "hamming"},
+            {"label": "Hann", "value": "hann"},
+            {"label": "Blackman", "value": "blackman"},
+            {"label": "Kaiser", "value": "kaiser"}
+        ],
+    },
+    'doppler-window-type': {
+        'label': 'Doppler Windowing',
+        'type': 'dropdown',
+        'default': 'none',
+        'options': [
+            {"label": "None", "value": "none"},
+            {"label": "Hamming", "value": "hamming"},
+            {"label": "Hann", "value": "hann"},
+            {"label": "Blackman", "value": "blackman"},
+            {"label": "Kaiser", "value": "kaiser"}
+        ],
+    },
+}
+
 
 def perform_range_doppler_processing(signal_data, tx_wfm, sample_rate_hz, prf_hz, range_window='none', doppler_window='none'):
     """
