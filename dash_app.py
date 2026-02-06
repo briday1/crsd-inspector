@@ -410,8 +410,21 @@ def execute_workflow(n_clicks, file_path, workflow_name, channel_id, param_value
             reader = crsd.Reader(f)
             root = reader.metadata.xmltree.getroot()
             
-            # Get channel data
-            signal_data = reader.read_signal(channel_id)
+            # Get all available channels from XML metadata
+            channel_ids = []
+            channels = root.findall('.//{http://api.nsgreg.nga.mil/schema/crsd/1.0}Channel')
+            for channel in channels:
+                ch_id_elem = channel.find('{http://api.nsgreg.nga.mil/schema/crsd/1.0}ChId')
+                if ch_id_elem is not None:
+                    channel_ids.append(ch_id_elem.text)
+            
+            # Load all channel data for variants (enables caching/memoization)
+            all_channel_data = {}
+            for ch_id in channel_ids:
+                all_channel_data[ch_id] = reader.read_signal(ch_id)
+            
+            # Use selected channel
+            signal_data = all_channel_data[channel_id]
             
             # Get TX waveform (if available)
             tx_wfm = None
@@ -437,10 +450,12 @@ def execute_workflow(n_clicks, file_path, workflow_name, channel_id, param_value
             except:
                 pass
             
-            # Build metadata dict
+            # Build metadata dict with all channel data for variants
             file_metadata = {
                 'tx_wfm': tx_wfm,
                 'selected_channel': channel_id,
+                'all_channels': channel_ids,
+                'signal_data_all_channels': all_channel_data,
                 'sample_rate_hz': sample_rate_hz,
                 'prf_hz': prf_hz,
             }
