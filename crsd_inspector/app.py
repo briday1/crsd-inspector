@@ -72,8 +72,14 @@ def discover_workflows():
             
             # Check for required functions/variables
             if hasattr(module, 'run_workflow'):
-                workflow_name = getattr(module, 'WORKFLOW_NAME', module_name)
-                workflow_desc = getattr(module, 'WORKFLOW_DESCRIPTION', '')
+                # Try to get workflow instance first, then fall back to module constants
+                if hasattr(module, 'workflow'):
+                    workflow_obj = getattr(module, 'workflow')
+                    workflow_name = workflow_obj.name
+                    workflow_desc = workflow_obj.description
+                else:
+                    workflow_name = getattr(module, 'WORKFLOW_NAME', module_name)
+                    workflow_desc = getattr(module, 'WORKFLOW_DESCRIPTION', '')
                 
                 workflows[workflow_name] = {
                     'module': module,
@@ -87,11 +93,22 @@ def discover_workflows():
     return workflows
 
 
-def execute_workflow(workflow_module, signal_data, metadata):
+def execute_workflow(workflow_module, channel_data, channel_id, tx_wfm, metadata, **kwargs):
     """Execute a workflow and return formatted results"""
     try:
+        # Extract signal data for selected channel
+        signal_data = channel_data[channel_id]
+        
+        # Add TX waveform to metadata
+        if tx_wfm is not None:
+            metadata['tx_wfm'] = tx_wfm
+        
+        # Add channel data and selected channel to metadata (for multi-channel workflows)
+        metadata['channel_data'] = channel_data
+        metadata['selected_channel'] = channel_id
+        
         # Run the workflow (internally handles graph creation and formatting)
-        results = workflow_module.run_workflow(signal_data=signal_data, metadata=metadata)
+        results = workflow_module.run_workflow(signal_data=signal_data, metadata=metadata, **kwargs)
         return results
     except Exception as e:
         import traceback
@@ -118,7 +135,7 @@ def load_and_process_file(file_path):
         return st.session_state.file_cache[file_path]
     
     try:
-        signal_block = None
+        channel_data = {}
         tx_wfm = None
         channel_ids = []
         sample_rate_hz = None
@@ -134,11 +151,15 @@ def load_and_process_file(file_path):
                 channel_ids = [ch.find('{http://api.nsgreg.nga.mil/schema/crsd/1.0}ChId').text 
                               for ch in channels] if channels else []
                 
-                # Load first channel (or only channel)
+                # Load ALL channels
                 if channel_ids:
-                    signal_block = reader.read_signal(channel_ids[0])
-                elif hasattr(reader, 'read_signal_block'):
-                    signal_block = reader.read_signal_block(0, 0, 256, 256)
+                    for ch_id in channel_ids:
+                        channel_data[ch_id] = reader.read_signal(ch_id)
+                else:
+                    # Fallback for files without channel metadata
+                    if hasattr(reader, 'read_signal_block'):
+                        channel_data["CHAN1"] = reader.read_signal_block(0, 0, 256, 256)
+                        channel_ids = ["CHAN1"]
                 
                 # Try to load TX waveform
                 try:
@@ -161,16 +182,17 @@ def load_and_process_file(file_path):
                 except:
                     pass
         
-        if signal_block is None:
+        if not channel_data:
             raise ValueError(f"Unable to read file format: {file_path}")
         
         # Extract minimal metadata
+        first_channel = list(channel_data.values())[0]
         metadata = {
             "filename": os.path.basename(file_path),
             "file_size_mb": os.path.getsize(file_path) / (1024 * 1024),
-            "shape": signal_block.shape,
-            "num_channels": len(channel_ids) if channel_ids else 1,
-            "channel_ids": channel_ids if channel_ids else ["CHAN1"],
+            "shape": first_channel.shape,
+            "num_channels": len(channel_ids),
+            "channel_ids": channel_ids,
         }
         
         # Add radar parameters if available
@@ -180,7 +202,7 @@ def load_and_process_file(file_path):
             metadata["prf_hz"] = prf_hz
         
         result = {
-            "signal_data": signal_block,
+            "channel_data": channel_data,
             "tx_wfm": tx_wfm,
             "metadata": metadata,
             "file_path": file_path
@@ -324,38 +346,65 @@ if st.session_state.crsd_files:
     if current_data is None:
         st.error("Failed to load file. Please check the file format.")
     else:
+        # Channel selection
+        channel_ids = current_data['metadata'].get('channel_ids', [])
+        if len(channel_ids) > 1:
+            selected_channel = st.selectbox("Select Channel", channel_ids, key="channel_selector")
+        else:
+            selected_channel = channel_ids[0] if channel_ids else None
+        
         # Execute workflow if selected
         workflow_results = None
-        if st.session_state.selected_workflow:
-            with st.spinner(f"Executing workflow..."):
+        if st.session_state.selected_workflow and selected_channel:
+            with st.spinner(f"Executing workflow on channel {selected_channel}..."):
                 workflow_results = execute_workflow(
                     st.session_state.selected_workflow['module'],
-                    current_data['signal_data'],
-                    current_data['metadata']
+                    current_data['channel_data'],
+                    selected_channel,
+                    current_data.get('tx_wfm'),
+                    current_data['metadata'].copy()
                 )
         
         # Display workflow results
         if workflow_results:
-            # Display tables
-            if workflow_results.get("tables"):
-                for table_data in workflow_results["tables"]:
-                    st.markdown(f"**{table_data['title']}**")
-                    # Convert dict to dataframe for better display
-                    if isinstance(table_data['data'], dict):
-                        df = pd.DataFrame(list(table_data['data'].items()), columns=['Metric', 'Value'])
-                        st.dataframe(df, use_container_width=True, hide_index=True)
-                    else:
-                        st.dataframe(table_data['data'], use_container_width=True)
-            
-            # Display plots (figure objects from workflow)
-            if workflow_results.get("plots"):
-                for fig in workflow_results["plots"]:
-                    st.plotly_chart(fig, use_container_width=True)
-            
-            # Display text
-            if workflow_results.get("text"):
-                for text in workflow_results["text"]:
-                    st.markdown(text)
+            # Check if new ordered format or legacy format
+            if "results" in workflow_results:
+                # New ordered format - display in order
+                for item in workflow_results["results"]:
+                    if item["type"] == "text":
+                        for text in item["content"]:
+                            st.markdown(text)
+                    elif item["type"] == "table":
+                        st.markdown(f"**{item['title']}**")
+                        # Convert dict to dataframe for better display
+                        if isinstance(item['data'], dict):
+                            df = pd.DataFrame(item['data'])
+                            st.dataframe(df, use_container_width=True, hide_index=True)
+                        else:
+                            st.dataframe(item['data'], use_container_width=True)
+                    elif item["type"] == "plot":
+                        st.plotly_chart(item["figure"], use_container_width=True)
+            else:
+                # Legacy format - display grouped by type (tables, plots, text)
+                if workflow_results.get("tables"):
+                    for table_data in workflow_results["tables"]:
+                        st.markdown(f"**{table_data['title']}**")
+                        # Convert dict to dataframe for better display
+                        if isinstance(table_data['data'], dict):
+                            df = pd.DataFrame(table_data['data'])
+                            st.dataframe(df, use_container_width=True, hide_index=True)
+                        else:
+                            st.dataframe(table_data['data'], use_container_width=True)
+                
+                # Display plots (figure objects from workflow)
+                if workflow_results.get("plots"):
+                    for fig in workflow_results["plots"]:
+                        st.plotly_chart(fig, use_container_width=True)
+                
+                # Display text
+                if workflow_results.get("text"):
+                    for text in workflow_results["text"]:
+                        st.markdown(text)
         else:
             st.info("Select a workflow from the sidebar to analyze this file")
 
@@ -377,3 +426,16 @@ st.sidebar.markdown("""
 **CRSD Inspector**  
 Workflow-Based Analysis
 """)
+
+
+def main():
+    """Entry point for crsd-inspector command"""
+    import sys
+    import streamlit.web.cli as stcli
+    
+    sys.argv = ["streamlit", "run", __file__]
+    sys.exit(stcli.main())
+
+
+if __name__ == "__main__":
+    pass  # Streamlit handles execution
