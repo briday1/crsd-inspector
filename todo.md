@@ -1,0 +1,1 @@
+- [ ] Allow for easy install on offline (air gapped machine)

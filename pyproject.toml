@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "crsd-inspector"
 version = "0.1.0"
-description = "CRSD file analysis and generation toolkit"
+description = "CRSD file analysis toolkit with Streamlit interface"
 readme = "README.md"
 requires-python = ">=3.9"
 license = {text = "MIT"}
@@ -29,9 +29,12 @@ dependencies = [
     "dagex>=2026.1",
     "sarkit>=1.0.0",
     "numpy>=1.24.0",
+    "scipy>=1.10.0",
     "matplotlib>=3.7.0",
     "plotly>=5.18.0",
     "lxml>=4.9.0",
+    "click>=8.0.0",
+    "rich>=13.0.0",
 ]
 
 [project.optional-dependencies]
@@ -41,15 +44,21 @@ dev = [
     "ruff>=0.1.0",
 ]
 
+generator = [
+    "click>=8.0.0",
+    "rich>=13.0.0",
+]
+
 [project.scripts]
-crsd-inspector = "crsd_inspector.cli:main"
+crsd-inspector = "crsd_inspector.app:main"
+crsd-generate = "crsd_generator.cli:cli"
 
 [project.urls]
 Homepage = "https://github.com/yourusername/crsd-inspector"
 Repository = "https://github.com/yourusername/crsd-inspector"
 
 [tool.setuptools.packages.find]
-include = ["crsd_inspector*"]
+include = ["crsd_inspector*", "crsd_generator*"]
 
 [tool.black]
 line-length = 100
