@@ -12,7 +12,7 @@ import sarkit.crsd as skcrsd
 
 from .models import (
     RadarTarget, ClutterConfig, SceneConfig, GenerationReport,
-    WaveformType, TargetModel, ClutterModel
+    WaveformType, TargetModel, ClutterModel, DataFormat
 )
 
 CRSD_NS = "http://api.nsgreg.nga.mil/schema/crsd/1.0"
@@ -28,6 +28,7 @@ class CRSDGenerator:
         """Initialize generator with scene configuration"""
         self.config = config
         self.rng = np.random.default_rng(42)  # Deterministic by default
+        self.pulse_times = None  # Store pulse times for continuous format
     
     def set_seed(self, seed: int):
         """Set random seed for reproducibility"""
@@ -67,6 +68,7 @@ class CRSDGenerator:
             # Use different random seed per channel for independent noise
             self.rng = np.random.default_rng(42 + ch_idx)
             
+            # Generate signal (same for both formats, just reshaped differently)
             rx_signal, target_stats = self._generate_targets(tx_wfm)
             
             # Add clutter
@@ -210,18 +212,28 @@ class CRSDGenerator:
         waveform /= np.sqrt(np.mean(np.abs(waveform) ** 2) + 1e-12)
         return waveform
     
+    def _generate_pulse_times(self) -> np.ndarray:
+        """Generate uniform pulse timing"""
+        P = self.config.num_pulses
+        prf = self.config.prf_hz
+        pri = 1.0 / prf
+        return np.arange(P, dtype=np.float64) * pri
+    
     def _generate_targets(self, tx_wfm: np.ndarray) -> tuple[np.ndarray, dict]:
-        """Generate target returns"""
+        """Generate target returns - same for both formats, just reshape differently"""
         P = self.config.num_pulses
         N = self.config.samples_per_pulse
         prf = self.config.prf_hz
         fs = self.config.sample_rate_hz
         
+        # Generate pulse-stacked data (P x N)
         rx = np.zeros((P, N), dtype=np.complex64)
         p = np.arange(P, dtype=np.float64)
         
+        # Generate pulse times for metadata
+        self.pulse_times = self._generate_pulse_times()
+        
         target_powers = []
-        target_snrs = []
         
         for target in self.config.targets:
             # Convert range to sample delay
@@ -231,11 +243,6 @@ class CRSDGenerator:
             
             if not (0 <= delay_samples < N):
                 continue  # Target out of range window
-            
-            # Calculate target amplitude from RCS and range
-            # Simplified radar equation: P_r = P_t * G * G * lambda^2 * RCS / ((4*pi)^3 * R^4)
-            wavelength = c / self.config.carrier_freq_hz
-            rcs_linear = 10 ** (target.rcs_dbsm / 10)
             
             # Use SNR to set amplitude (simplified)
             amp = np.sqrt(10 ** (self.config.snr_db / 10)) * (1000.0 / target.range_m)
@@ -274,7 +281,24 @@ class CRSDGenerator:
             tgt_power = np.mean(np.abs(target_signal) ** 2)
             target_powers.append(float(tgt_power))
         
-        # Compute SNRs (will finalize after noise is added)
+        # If continuous format, reshape to include inter-pulse gaps
+        if self.config.data_format == DataFormat.CONTINUOUS:
+            # Calculate samples per PRI (pulse repetition interval)
+            fs = self.config.sample_rate_hz
+            pri_samples = int(fs / self.config.prf_hz)
+            
+            # Create continuous signal with proper timing
+            total_samples = P * pri_samples
+            rx_continuous = np.zeros(total_samples, dtype=np.complex64)
+            
+            # Place each pulse at its proper time
+            for p_idx in range(P):
+                start_sample = p_idx * pri_samples
+                end_sample = start_sample + N
+                rx_continuous[start_sample:end_sample] = rx[p_idx, :]
+            
+            rx = rx_continuous[None, :]  # Reshape to (1, total_samples)
+        
         return rx, {"powers": target_powers, "snrs_db": []}
     
     def _add_clutter(self, rx_signal: np.ndarray, tx_wfm: np.ndarray) -> tuple[np.ndarray, int]:
@@ -366,8 +390,12 @@ class CRSDGenerator:
     def _write_crsd(self, rx_signals: list[np.ndarray], tx_wfm: np.ndarray) -> int:
         """Write CRSD file with multiple channels"""
         # Get dimensions from first channel
-        P, N = rx_signals[0].shape
+        num_vectors, num_samples = rx_signals[0].shape
         num_channels = len(rx_signals)
+        
+        # For continuous format, vectors=1, for stacked vectors=num_pulses
+        is_continuous = (self.config.data_format == DataFormat.CONTINUOUS)
+        num_pulses = self.config.num_pulses
         
         # Create channel IDs
         ch_ids = [f"CHAN{i+1}" for i in range(num_channels)]
@@ -376,18 +404,26 @@ class CRSDGenerator:
         
         # Create XML metadata
         xmltree = self._make_crsd_xml(
-            num_pulses=P,
-            num_samples=N,
-            tx_wfm_len=len(tx_wfm),  # Actual TX waveform length
+            num_vectors=num_vectors,
+            num_samples=num_samples,
+            num_pulses=num_pulses,
+            tx_wfm_len=len(tx_wfm),
             ch_ids=ch_ids,
             tx_id=tx_id,
             tx_wfm_sa_id=sa_id,
         )
         
         # Build PVP/PPP
-        prf = self.config.prf_hz
-        tx_time = np.arange(P, dtype=np.float64) / prf
-        rcv_time = tx_time.copy()
+        if is_continuous:
+            # Continuous: one PVP entry per channel, num_pulses PPP entries
+            total_time = self.pulse_times[-1] if self.pulse_times is not None else 0.0
+            rcv_time = np.array([total_time / 2.0], dtype=np.float64)
+            tx_time = self.pulse_times.copy() if self.pulse_times is not None else np.arange(num_pulses, dtype=np.float64) / self.config.prf_hz
+        else:
+            # Stacked: P PVP entries per channel, P PPP entries
+            prf = self.config.prf_hz
+            tx_time = np.arange(num_pulses, dtype=np.float64) / prf
+            rcv_time = tx_time.copy()
         
         # Prepare support array
         tx_sa = tx_wfm[None, :].astype(np.complex64)
@@ -401,6 +437,10 @@ class CRSDGenerator:
                     "NUM_CHANNELS": str(num_channels),
                     "NUM_TARGETS": str(len(self.config.targets)),
                     "SNR_DB": f"{self.config.snr_db:.2f}",
+                    "SAMPLE_RATE_HZ": f"{self.config.sample_rate_hz:.0f}",
+                    "PRF_HZ": f"{self.config.prf_hz:.1f}",
+                    "NUM_PULSES": str(num_pulses),
+                    "DATA_FORMAT": self.config.data_format.value,
                 }
             ),
         )
@@ -415,12 +455,12 @@ class CRSDGenerator:
                 writer.write_signal(ch_id, rx_signal)
                 
                 # Write PVP for this channel
-                pvps = np.zeros(P, dtype=skcrsd.get_pvp_dtype(xmltree))
+                pvps = np.zeros(num_vectors, dtype=skcrsd.get_pvp_dtype(xmltree))
                 pvps["RcvTime"] = rcv_time
                 writer.write_pvp(ch_id, pvps)
             
-            # Write PPP (shared across channels)
-            ppps = np.zeros(P, dtype=skcrsd.get_ppp_dtype(xmltree))
+            # Write PPP (pulse timing)
+            ppps = np.zeros(num_pulses, dtype=skcrsd.get_ppp_dtype(xmltree))
             ppps["TxTime"] = tx_time
             writer.write_ppp(tx_id, ppps)
             
@@ -433,8 +473,9 @@ class CRSDGenerator:
     def _make_crsd_xml(
         self,
         *,
-        num_pulses: int,
+        num_vectors: int,
         num_samples: int,
+        num_pulses: int,
         tx_wfm_len: int,
         ch_ids: list[str],
         tx_id: str,
@@ -468,7 +509,7 @@ class CRSDGenerator:
         for ch_id in ch_ids:
             ch = ET.SubElement(rcv, f"{{{CRSD_NS}}}Channel")
             ET.SubElement(ch, f"{{{CRSD_NS}}}ChId").text = ch_id
-            ET.SubElement(ch, f"{{{CRSD_NS}}}NumVectors").text = str(num_pulses)
+            ET.SubElement(ch, f"{{{CRSD_NS}}}NumVectors").text = str(num_vectors)
             ET.SubElement(ch, f"{{{CRSD_NS}}}NumSamples").text = str(num_samples)
             ET.SubElement(ch, f"{{{CRSD_NS}}}SignalArrayByteOffset").text = "0"
             ET.SubElement(ch, f"{{{CRSD_NS}}}PVPArrayByteOffset").text = "0"
