@@ -212,6 +212,7 @@ def _format_results(context):
             xaxis_title="Range Sample",
             yaxis_title="Pulse Number",
             height=600,
+            template='plotly_dark',
             sliders=[
                 dict(
                     active=10,
@@ -290,6 +291,7 @@ def _format_results(context):
             xaxis_title="Range Sample",
             yaxis_title="Pulse Number",
             height=600,
+            template='plotly_dark',
             sliders=[
                 dict(
                     active=7,
@@ -368,7 +370,8 @@ def _format_results(context):
             yaxis_title="Power (dB)",
             height=500,
             hovermode='x',
-            showlegend=True
+            showlegend=True,
+            template='plotly_dark'
         )
         workflow.add_plot(fig_psd)
     
@@ -385,7 +388,8 @@ def _format_results(context):
             title="Amplitude Distribution",
             xaxis_title="Amplitude",
             yaxis_title="Count",
-            height=500
+            height=400,
+            template='plotly_dark'
         )
         workflow.add_plot(fig)
     
