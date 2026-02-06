@@ -158,7 +158,7 @@ WORKFLOWS = {
 # App layout - 3 column design
 app.layout = dbc.Container([
     dbc.Row([
-        html.H1("CRSD Inspector", className="text-center my-4", style={'marginTop': '2rem'}),
+        html.H3("CRSD Inspector", className="text-center my-1", style={'marginTop': '0.5rem', 'marginBottom': '0.5rem'}),
     ]),
     
     # Top Row: File Selection and Workflow Options
