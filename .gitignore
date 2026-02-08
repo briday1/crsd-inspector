@@ -41,5 +41,8 @@ Thumbs.db
 tmp/
 temp/
 
+# Output directories
+pulse_extraction_output/
+
 # Streamlit
 .streamlit/
