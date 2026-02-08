@@ -1,49 +1,25 @@
 """
 Pulse Extraction Workflow
 
-Detects pulse start times from continuous CRSD data and performs pulse stacking.
-Handles both uniform and staggered PRF patterns.
+Simple matched filter processing for continuous radar data.
 """
 
 import numpy as np
 import plotly.graph_objects as go
-from plotly.subplots import make_subplots
 from crsd_inspector.workflows.workflow import Workflow
-from scipy.signal import find_peaks, correlate
+from scipy.signal import correlate
+from sklearn.cluster import KMeans
+import finufft
 
 
 # Create workflow instance
 workflow = Workflow(
     name="Pulse Extraction",
-    description="Detect pulse start times and perform pulse stacking from continuous data"
+    description="Matched filter processing for continuous radar data"
 )
 
 # Workflow parameters
 PARAMS = {
-    'min_prf_hz': {
-        'label': 'Min PRF (Hz)',
-        'type': 'number',
-        'default': 100,
-        'min': 1,
-        'max': 100000,
-        'step': 10,
-    },
-    'max_prf_hz': {
-        'label': 'Max PRF (Hz)',
-        'type': 'number',
-        'default': 10000,
-        'min': 100,
-        'max': 100000,
-        'step': 100,
-    },
-    'power_threshold_db': {
-        'label': 'Power Threshold (dB)',
-        'type': 'number',
-        'default': -20,
-        'min': -100,
-        'max': 0,
-        'step': 1,
-    },
     'window_type': {
         'label': 'Range Window',
         'type': 'dropdown',
@@ -55,588 +31,1163 @@ PARAMS = {
             {'label': 'Blackman', 'value': 'blackman'},
         ]
     },
+    'min_prf_hz': {
+        'label': 'Min PRF (Hz)',
+        'type': 'number',
+        'default': 800,
+    },
+    'max_prf_hz': {
+        'label': 'Max PRF (Hz)',
+        'type': 'number',
+        'default': 1200,
+    },
 }
 
 
-def detect_pulse_starts(signal_data, sample_rate_hz, reference_waveform=None, 
-                        min_prf_hz=100, max_prf_hz=10000, power_threshold_db=-20, window_type='hamming'):
+def _make_window(n, window_type):
+    if (window_type is None) or (window_type == 'none'):
+        return np.ones(n)
+    if window_type == 'hamming':
+        return np.hamming(n)
+    if window_type == 'hanning':
+        return np.hanning(n)
+    if window_type == 'blackman':
+        return np.blackman(n)
+    return np.ones(n)
+
+
+def detect_pulse_toas(mf_output, sample_rate_hz, min_prf_hz, threshold_db=10):
     """
-    Detect pulse start times from continuous signal data using matched filtering
+    Detect pulse time-of-arrivals (TOAs) using leading edge detection.
     
+    Args:
+        mf_output: 1D matched filter output (complex)
+        sample_rate_hz: Sample rate in Hz
+        min_prf_hz: Minimum PRF (slowest pulse rate) - used to set minimum spacing
+        threshold_db: Detection threshold in dB above noise floor
+    
+    Returns:
+        toa_indices: Array of TOA sample indices
+    """
+    # Compute magnitude in dB
+    mf_mag = np.abs(mf_output)
+    mf_db = 10 * np.log10(mf_mag ** 2 + 1e-12)
+    
+    # Estimate noise floor from lower percentile
+    noise_floor = np.percentile(mf_db, 10)
+    detection_threshold = noise_floor + threshold_db
+    
+    # Find samples above threshold
+    above_threshold = mf_db > detection_threshold
+    
+    # Find leading edges (transitions from below to above threshold)
+    edges = np.diff(above_threshold.astype(int))
+    leading_edges = np.where(edges == 1)[0] + 1  # +1 because diff shifts by 1
+    
+    # Enforce minimum spacing (based on max PRF to avoid double detections)
+    min_spacing = int(sample_rate_hz / min_prf_hz * 0.8)  # 80% of min PRI
+    
+    toa_indices = []
+    last_toa = -min_spacing
+    for edge_idx in leading_edges:
+        if edge_idx - last_toa >= min_spacing:
+            toa_indices.append(edge_idx)
+            last_toa = edge_idx
+    
+    return np.array(toa_indices, dtype=int)
+
+
+def extract_toa_windowed_2d(mf_output, toa_indices, min_prf_hz, max_prf_hz, sample_rate_hz):
+    """
+    Extract fixed-length pulse windows at each TOA to create 2D pulse array.
+    
+    Each window captures just the pulse itself (not the full PRI), so all
+    pulses are aligned at the start of their respective rows.
+    
+    Args:
+        mf_output: 1D matched filter output
+        toa_indices: Array of TOA sample indices
+        min_prf_hz: Minimum PRF
+        max_prf_hz: Maximum PRF (determines window length - one pulse period)
+        sample_rate_hz: Sample rate in Hz
+    
+    Returns:
+        windows_2d: 2D array (num_pulses x window_length)
+        window_length: Length of each window in samples
+        toa_indices: Filtered TOA indices (ones that fit valid windows)
+    """
+    # Window length = one period at fastest PRF (captures single pulse)
+    window_length = int(sample_rate_hz / max_prf_hz)
+    
+    # Filter TOAs to ensure valid windows
+    valid_toas = []
+    for toa in toa_indices:
+        if toa + window_length <= len(mf_output):
+            valid_toas.append(toa)
+    
+    valid_toas = np.array(valid_toas, dtype=int)
+    num_pulses = len(valid_toas)
+    
+    # Extract windows - all starting at TOA so pulses are aligned
+    windows_2d = np.zeros((num_pulses, window_length), dtype=mf_output.dtype)
+    for i, toa in enumerate(valid_toas):
+        windows_2d[i, :] = mf_output[toa:toa + window_length]
+    
+    return windows_2d, window_length, valid_toas
+
+
+def compute_ppc_correlations(windows_2d):
+    """
+    Compute correlations between consecutive windows for PPC analysis.
+    
+    Correlates each window with the next window to extract the full
+    correlation function, revealing pulse interval patterns.
+    
+    Args:
+        windows_2d: 2D array (num_windows x window_length) from windowed data
+    
+    Returns:
+        correlations: 2D array (num_pairs x correlation_length) of correlation magnitudes
+        peak_positions: Array of peak positions (sample index within window)
+        peak_values: Array of peak magnitudes
+    """
+    num_windows = windows_2d.shape[0]
+    num_pairs = num_windows - 1
+    window_length = windows_2d.shape[1]
+    
+    # Store all correlations
+    correlations = np.zeros((num_pairs, window_length), dtype=float)
+    peak_positions = np.zeros(num_windows, dtype=int)
+    peak_values = np.zeros(num_windows)
+    
+    # First, get peak position in each window
+    for i in range(num_windows):
+        window_mag = np.abs(windows_2d[i, :])
+        peak_idx = np.argmax(window_mag)
+        peak_positions[i] = peak_idx
+        peak_values[i] = window_mag[peak_idx]
+    
+    # Compute correlations between consecutive windows
+    for i in range(num_pairs):
+        corr = correlate(windows_2d[i+1, :], np.conj(windows_2d[i, :]), mode='same', method='fft')
+        correlations[i, :] = np.abs(corr)
+    
+    return correlations, peak_positions, peak_values
+
+
+def downsample_heatmap(data_2d, max_width=2000, max_height=1000):
+    """
+    Downsample 2D heatmap data for efficient rendering.
+    
+    Args:
+        data_2d: 2D array (rows x cols)
+        max_width: Maximum number of columns to keep
+        max_height: Maximum number of rows to keep
+    
+    Returns:
+        downsampled: Downsampled 2D array
+        skip_x: Downsampling factor for columns
+        skip_y: Downsampling factor for rows
+    """
+    rows, cols = data_2d.shape
+    
+    # Calculate downsampling factors
+    skip_x = max(1, cols // max_width)
+    skip_y = max(1, rows // max_height)
+    
+    # Downsample by taking every Nth sample
+    downsampled = data_2d[::skip_y, ::skip_x]
+    
+    return downsampled, skip_x, skip_y
+
+
+def apply_matched_filter(signal_data, reference_waveform, window_type='hamming'):
+    """
+    Apply matched filter to continuous signal data.
+
     Args:
         signal_data: Continuous signal (1 x num_samples) or (num_samples,)
-        sample_rate_hz: Sample rate in Hz
-        reference_waveform: Reference pulse for matched filtering (if None, uses energy detection)
-        min_prf_hz: Minimum expected PRF (Hz) - sets max distance between pulses
-        max_prf_hz: Maximum expected PRF (Hz) - sets min distance between pulses
-        power_threshold_db: Detection threshold relative to peak (dB)
+        reference_waveform: Reference pulse for matched filtering
         window_type: Window function for range processing ('none', 'hamming', 'hanning', 'blackman')
-        
-    Returns:
-        pulse_start_samples: Array of pulse start sample indices
-        pulse_start_times: Array of pulse start times (seconds)
-        detection_info: Dict with detection statistics (includes mf_output_db for visualization)
-    """
-    # Ensure 1D
-    if signal_data.ndim > 1:
-        signal_data = signal_data.ravel()
-    
-    # Matched filtering if reference waveform provided
-    if reference_waveform is not None:
-        # Apply window to reference waveform for sidelobe control
-        ref_wfm = reference_waveform.copy()
-        if window_type and window_type != 'none':
-            if window_type == 'hamming':
-                window_func = np.hamming(len(ref_wfm))
-            elif window_type == 'hanning':
-                window_func = np.hanning(len(ref_wfm))
-            elif window_type == 'blackman':
-                window_func = np.blackman(len(ref_wfm))
-            else:
-                window_func = np.ones(len(ref_wfm))
-            ref_wfm = ref_wfm * window_func
-        
-        # Matched filter the entire continuous signal
-        # The MF output will show high power where pulses exist and low power in gaps
-        print(f"Applying matched filter to {len(signal_data)} samples...")
-        mf_output = correlate(signal_data, np.conj(ref_wfm), mode='same')
-        mf_power = np.abs(mf_output) ** 2
-        mf_output_db = 10 * np.log10(mf_power + 1e-12)
-        
-        # The matched filter naturally compresses the pulse
-        # For pulse detection: find transitions from low to high power (pulse starts)
-        # Use the MF power directly
-        power = mf_power
-        use_matched_filter = True
-    else:
-        # Fallback to instantaneous power
-        power = np.abs(signal_data) ** 2
-        mf_output_db = None
-        use_matched_filter = False
-    
-    # Convert to dB for visualization
-    power_db = 10 * np.log10(power + 1e-12)
-    
-    # For matched filter output, find pulse starts from power transitions
-    if use_matched_filter:
-        # The MF output will have contiguous regions of high power (the pulse duration)
-        # separated by regions of low power (inter-pulse gaps).
-        # We want to find the START of each high-power region.
-        
-        # Minimum distance between pulses based on max PRF
-        min_distance_samples = int(sample_rate_hz / max_prf_hz * 0.8)
-        
-        # Adaptive threshold
-        peak_power_db = np.max(power_db)
-        threshold_db = peak_power_db + power_threshold_db
-        threshold_linear = 10 ** (threshold_db / 10)
-        
-        # Find regions above threshold
-        above_threshold = power > threshold_linear
-        
-        # Find ALL rising edges
-        transitions = np.diff(above_threshold.astype(int))
-        all_rising_edges = np.where(transitions == 1)[0] + 1
-        
-        # Group rising edges that are close together (within same pulse)
-        # Only keep the FIRST edge of each group
-        if len(all_rising_edges) > 1:
-            pulse_start_samples = [all_rising_edges[0]]
-            for edge in all_rising_edges[1:]:
-                # If this edge is far from the last selected edge, it's a new pulse
-                if edge - pulse_start_samples[-1] >= min_distance_samples:
-                    pulse_start_samples.append(edge)
-            pulse_start_samples = np.array(pulse_start_samples)
-        else:
-            pulse_start_samples = all_rising_edges
-        
-        # For visualization, show the matched filter output
-        smoothed_power_db = mf_output_db
-        window_samples = 1  # Not using additional smoothing
-        
-    else:
-        # Energy detection with sliding window for raw power
-        # Window size: fraction of minimum PRI to capture pulse energy
-        window_samples = int(sample_rate_hz / max_prf_hz / 4)  # 1/4 of minimum PRI
-        window_samples = max(window_samples, 100)  # At least 100 samples
-        
-        # Convolve power with rectangular window (moving average)
-        window = np.ones(window_samples) / window_samples
-        smoothed_power = np.convolve(power, window, mode='same')
-        
-        # Convert to dB
-        smoothed_power_db = 10 * np.log10(smoothed_power + 1e-12)
-        
-        # Adaptive threshold
-        peak_power_db = np.max(smoothed_power_db)
-        threshold_db = peak_power_db + power_threshold_db
-        threshold_linear = 10 ** (threshold_db / 10)
-        
-        # Find regions above threshold (pulse bursts)
-        above_threshold = smoothed_power > threshold_linear
-        
-        # Find rising edges (pulse starts)
-        transitions = np.diff(above_threshold.astype(int))
-        pulse_start_samples = np.where(transitions == 1)[0] + 1
-        
-        # Minimum distance between pulses
-        min_distance_samples = int(sample_rate_hz / max_prf_hz * 0.8)  # 80% of minimum PRI
-        
-        # Filter out pulses too close together
-        if len(pulse_start_samples) > 1:
-            valid_pulses = [pulse_start_samples[0]]
-            for pulse_start in pulse_start_samples[1:]:
-                if pulse_start - valid_pulses[-1] >= min_distance_samples:
-                    valid_pulses.append(pulse_start)
-            pulse_start_samples = np.array(valid_pulses)
-    
-    if len(pulse_start_samples) == 0:
-        return np.array([]), np.array([]), {
-            'num_pulses': 0,
-            'threshold_db': threshold_db,
-            'peak_power_db': peak_power_db,
-            'smoothed_power_db': smoothed_power_db,
-            'mf_output_db': mf_output_db,
-            'window_samples': window_samples,
-            'error': 'No pulses detected above threshold'
-        }
-    
-    # Convert to times
-    pulse_start_times = pulse_start_samples / sample_rate_hz
-    
-    # Compute PRF statistics
-    if len(pulse_start_samples) > 1:
-        pris = np.diff(pulse_start_times)
-        prfs = 1.0 / pris
-        avg_prf = np.mean(prfs)
-        min_prf = np.min(prfs)
-        max_prf = np.max(prfs)
-        std_prf = np.std(prfs)
-        
-        # Detect if staggered (std > 1% of mean)
-        is_staggered = (std_prf / avg_prf) > 0.01
-    else:
-        avg_prf = min_prf = max_prf = std_prf = 0.0
-        is_staggered = False
-    
-    detection_info = {
-        'num_pulses': len(pulse_start_samples),
-        'threshold_db': threshold_db,
-        'peak_power_db': peak_power_db,
-        'avg_prf_hz': float(avg_prf),
-        'min_prf_hz': float(min_prf),
-        'max_prf_hz': float(max_prf),
-        'std_prf_hz': float(std_prf),
-        'is_staggered': bool(is_staggered),
-        'avg_pri_sec': float(1.0 / avg_prf) if avg_prf > 0 else 0.0,
-        'smoothed_power_db': smoothed_power_db,
-        'mf_output_db': mf_output_db,
-        'window_samples': window_samples,
-    }
-    
-    return pulse_start_samples, pulse_start_times, detection_info
 
-
-def extract_pulses(signal_data, pulse_start_samples, samples_per_pulse):
-    """
-    Extract pulses from continuous data given start positions
-    
-    Args:
-        signal_data: Continuous signal (1D array)
-        pulse_start_samples: Array of pulse start sample indices
-        samples_per_pulse: Number of samples to extract per pulse
-        
     Returns:
-        pulse_stack: Extracted pulses (num_pulses x samples_per_pulse)
-        valid_pulses: Boolean mask of successfully extracted pulses
+        mf_output: Matched filter output (complex, same length as signal_data)
     """
     if signal_data.ndim > 1:
         signal_data = signal_data.ravel()
-    
-    num_pulses = len(pulse_start_samples)
-    total_samples = len(signal_data)
-    
-    pulse_stack = np.zeros((num_pulses, samples_per_pulse), dtype=signal_data.dtype)
-    valid_pulses = np.zeros(num_pulses, dtype=bool)
-    
-    for i, start_idx in enumerate(pulse_start_samples):
-        end_idx = start_idx + samples_per_pulse
-        
-        if end_idx <= total_samples:
-            # Full pulse fits
-            pulse_stack[i, :] = signal_data[start_idx:end_idx]
-            valid_pulses[i] = True
-        elif start_idx < total_samples:
-            # Partial pulse - zero pad
-            available = total_samples - start_idx
-            pulse_stack[i, :available] = signal_data[start_idx:total_samples]
-            valid_pulses[i] = True
-    
-    return pulse_stack, valid_pulses
+
+    ref_wfm = reference_waveform.copy()
+    w = _make_window(len(ref_wfm), window_type)
+    ref_wfm = ref_wfm * w
+
+    print(f"Applying matched filter to {len(signal_data)} samples...")
+    mf_output = correlate(signal_data, np.conj(ref_wfm), mode='same', method='fft')
+    print("  ✓ Matched filter complete")
+    return mf_output
 
 
 def run_workflow(signal_data, metadata=None, **kwargs):
-    """
-    Execute pulse extraction workflow
-    
-    Args:
-        signal_data: Continuous CRSD signal data (1 x total_samples)
-        metadata: Dict with:
-            - sample_rate_hz: Sample rate
-            - samples_per_pulse: Expected samples per pulse (for extraction)
-            - min_prf_hz: Minimum PRF constraint (default: 100)
-            - max_prf_hz: Maximum PRF constraint (default: 10000)
-            - power_threshold_db: Detection threshold (default: -20)
-    """
     workflow.clear()
-    
     if metadata is None:
         metadata = {}
-    
-    # Extract parameters
-    sample_rate_hz = metadata.get('sample_rate_hz', 100e6)
-    min_prf_hz = metadata.get('min_prf_hz', 100)
-    max_prf_hz = metadata.get('max_prf_hz', 10000)
-    power_threshold_db = metadata.get('power_threshold_db', -20)
+
+    sample_rate_hz = float(metadata.get('sample_rate_hz', 100e6))
     window_type = metadata.get('window_type', 'hamming')
-    tx_wfm = metadata.get('tx_wfm', None)  # Reference waveform for matched filtering
+    min_prf_hz = float(metadata.get('min_prf_hz', 800))
+    max_prf_hz = float(metadata.get('max_prf_hz', 1200))
+    tx_wfm = metadata.get('tx_wfm', None)
     
-    # Ensure we have continuous data
+    # Ground truth information (if available from metadata)
+    workflow.add_text("\n=== Ground Truth (from CRSD metadata) ===")
+    file_header_kvps = metadata.get('file_header_kvps', {})
+    if file_header_kvps:
+        # Extract truth parameters
+        truth_prf = float(file_header_kvps.get('PRF_HZ', 0))
+        stagger_pattern = file_header_kvps.get('STAGGER_PATTERN', 'unknown')
+        num_pulses_truth = int(file_header_kvps.get('NUM_PULSES', 0))
+        num_targets = int(file_header_kvps.get('NUM_TARGETS', 0))
+        
+        workflow.add_text([
+            f"Stagger Pattern: {stagger_pattern}",
+            f"Nominal PRF: {truth_prf:.1f} Hz",
+            f"Number of Pulses (Ground Truth): {num_pulses_truth}",
+            f"Number of Targets: {num_targets}",
+        ])
+        
+        # For 2-step stagger with 15% variation
+        if stagger_pattern == "2-step":
+            stagger_ratio = 0.15  # Default from generator code
+            # Check if we can read the actual stagger ratio from metadata
+            if 'STAGGER_RATIO' in file_header_kvps:
+                stagger_ratio = float(file_header_kvps['STAGGER_RATIO'])
+            
+            prf_high = truth_prf / (1 - stagger_ratio)  # Shorter PRI = higher PRF
+            prf_low = truth_prf / (1 + stagger_ratio)   # Longer PRI = lower PRF
+            pri_high = 1.0 / prf_low  # Longer PRI in seconds
+            pri_low = 1.0 / prf_high  # Shorter PRI in seconds
+            workflow.add_text([
+                f"True PRF range (2-step): {prf_low:.1f} - {prf_high:.1f} Hz",
+                f"True PRI range: {pri_low*1e6:.1f} - {pri_high*1e6:.1f} μs",
+                f"  High PRF ({prf_high:.1f} Hz) = Short PRI ({pri_low*1e6:.1f} μs)",
+                f"  Low PRF ({prf_low:.1f} Hz) = Long PRI ({pri_high*1e6:.1f} μs)",
+            ])
+        
+        # Target truth - handle both example_2 (5 targets) and example_4 (2 targets)
+        workflow.add_text([""])
+        if num_targets == 2:
+            # example_4.crsd
+            workflow.add_text([
+                "**Target Truth (from generation):**",
+                "  1. Target_A:  Range=2500m (16.7μs),  Doppler=+75Hz,  RCS=15dBsm",
+                "  2. Target_B:  Range=4000m (26.7μs),  Doppler=-45Hz,  RCS=12dBsm",
+            ])
+        elif num_targets == 5:
+            # example_2.crsd
+            workflow.add_text([
+                "**Target Truth (from generation):**",
+                "  1. Fast Car:     Range=1500m (10.0μs),  Doppler=+100Hz, RCS=8dBsm",
+                "  2. Truck:        Range=2800m (18.7μs),  Doppler=-50Hz,  RCS=12dBsm",
+                "  3. Motorcycle:   Range=3200m (21.3μs),  Doppler=+20Hz,  RCS=6dBsm",
+                "  4. Helicopter:   Range=4500m (30.0μs),  Doppler=-80Hz,  RCS=10dBsm",
+                "  5. Tower:        Range=6000m (40.0μs),  Doppler=+5Hz,   RCS=18dBsm",
+            ])
+        else:
+            workflow.add_text([f"**Target Truth:** {num_targets} targets (details not available)"])
+        
+        workflow.add_text([
+            "",
+            "Note: Range shown is one-way slant range. Round-trip time = 2×Range/c",
+        ])
+    else:
+        workflow.add_text("No ground truth metadata available")
+
     if signal_data.ndim == 1:
-        signal_data = signal_data[None, :]  # Add dimension
-    
-    num_vectors, total_samples = signal_data.shape
-    
-    workflow.add_text(f"Pulse Extraction from Continuous Data")
+        signal_data = signal_data[None, :]
+
+    total_samples = int(signal_data.shape[1])
+
+    workflow.add_text("Matched Filter Processing")
     workflow.add_text([
         f"Total samples: {total_samples:,}",
         f"Sample rate: {sample_rate_hz/1e6:.1f} MHz",
-        f"Total time: {total_samples/sample_rate_hz:.3f} seconds",
-        f"PRF constraints: [{min_prf_hz:.0f}, {max_prf_hz:.0f}] Hz",
-        f"Detection threshold: {power_threshold_db:.1f} dB",
-        f"Matched filter: {'Enabled' if tx_wfm is not None else 'Disabled (energy detection)'}",
-        f"Range window: {window_type.capitalize() if window_type != 'none' else 'None'}",
+        f"Total time: {total_samples/sample_rate_hz*1000:.2f} ms",
     ])
-    
+
     try:
-        # Step 1: Detect pulse start times
-        pulse_start_samples, pulse_start_times, detection_info = detect_pulse_starts(
-            signal_data,
-            sample_rate_hz,
-            reference_waveform=tx_wfm,
-            min_prf_hz=min_prf_hz,
-            max_prf_hz=max_prf_hz,
-            power_threshold_db=power_threshold_db,
-            window_type=window_type
+        if tx_wfm is None:
+            workflow.add_text("\nError: No reference waveform provided")
+            return workflow.build()
+
+        import time
+        t0 = time.time()
+        workflow.add_text("\n=== Matched Filter ===")
+
+        mf_output = apply_matched_filter(signal_data, tx_wfm, window_type=window_type)
+        mf_output_db = 10 * np.log10(np.abs(mf_output) ** 2 + 1e-12)
+
+        t1 = time.time()
+        workflow.add_text(f"MF output: {len(mf_output)} samples ({t1 - t0:.2f} sec)")
+
+        # Plot matched filter output
+        time_axis_ms = np.arange(len(mf_output_db)) / sample_rate_hz * 1000.0
+        fig1 = go.Figure()
+        fig1.add_trace(go.Scatter(
+            x=time_axis_ms, y=mf_output_db,
+            mode='lines', name='Matched Filter Output',
+            line=dict(color='cyan', width=1)
+        ))
+        fig1.update_layout(
+            title="Matched Filter Output",
+            xaxis_title="Time (ms)",
+            yaxis_title="Power (dB)",
+            template='plotly_dark',
+            height=600
         )
+        workflow.add_plot(fig1)
+
+        # Reshape data according to shortest PRI
+        workflow.add_text("\n=== Pulse Extraction (Fixed Sampling) ===")
         
-        num_pulses = detection_info['num_pulses']
+        # Use shortest PRI (fastest PRF) for both step and window
+        shortest_pri_samples = int(sample_rate_hz / max_prf_hz)
+        shortest_pri_us = shortest_pri_samples / sample_rate_hz * 1e6
         
-        workflow.add_text(f"\nDetected {num_pulses} pulses")
+        workflow.add_text([
+            f"Max PRF: {max_prf_hz} Hz",
+            f"Shortest PRI: {shortest_pri_samples} samples ({shortest_pri_us:.2f} μs)",
+            f"Sampling every {shortest_pri_samples} samples",
+        ])
         
-        # Add PRF statistics
-        if num_pulses > 1:
-            prf_info = [
-                f"Average PRF: {detection_info['avg_prf_hz']:.2f} Hz",
-                f"PRF range: [{detection_info['min_prf_hz']:.2f}, {detection_info['max_prf_hz']:.2f}] Hz",
-                f"Std deviation: {detection_info['std_prf_hz']:.2f} Hz",
-                f"Average PRI: {detection_info['avg_pri_sec']*1000:.3f} ms",
-                f"Stagger detected: {'Yes' if detection_info['is_staggered'] else 'No'}",
-            ]
-            workflow.add_text(prf_info)
+        # Reshape: extract windows every shortest_pri samples
+        num_windows = (len(mf_output) - shortest_pri_samples) // shortest_pri_samples
+        windows_2d = np.zeros((num_windows, shortest_pri_samples), dtype=mf_output.dtype)
         
-        # Only extract pulses if we detected some
-        if num_pulses > 0:
-            # Step 2: Determine pulse width automatically
-            # For continuous data: find where each pulse ends (falling edge after start)
-            # Conservative: use typical radar duty cycle (~10%) or estimate from data
-            if num_pulses > 1:
-                # Use average PRI and assume ~10% duty cycle for pulse width
-                avg_pri_samples = int(sample_rate_hz / detection_info['avg_prf_hz'])
-                samples_per_pulse = max(512, avg_pri_samples // 10)  # At least 512 samples, or 10% of PRI
-            else:
-                # Single pulse - estimate from reference waveform
-                if tx_wfm is not None:
-                    samples_per_pulse = len(tx_wfm) * 2  # Conservative: 2x ref waveform
-                else:
-                    samples_per_pulse = 1000  # Default fallback
-            
-            workflow.add_text(f"\nEstimated pulse width: {samples_per_pulse} samples ({samples_per_pulse/sample_rate_hz*1e6:.2f} µs)")
-            
-            # Step 3: Extract pulses
-            pulse_stack, valid_pulses = extract_pulses(
-                signal_data,
-                pulse_start_samples,
-                samples_per_pulse
-            )
-            
-            num_valid = np.sum(valid_pulses)
-            workflow.add_text(f"Extracted {num_valid}/{num_pulses} valid pulses")
-            workflow.add_text(f"Pulse stack shape: {pulse_stack.shape}")
-        else:
-            workflow.add_text("\nNo pulses to extract. Try adjusting the detection threshold.")
-            num_valid = 0
-            pulse_stack = None
-            samples_per_pulse = 0
+        for i in range(num_windows):
+            start_idx = i * shortest_pri_samples
+            end_idx = start_idx + shortest_pri_samples
+            windows_2d[i, :] = mf_output[start_idx:end_idx]
         
-        # Create statistics table
-        stats_table = {
-            'Metric': [
-                'Pulses Detected',
-                'Valid Pulses',
-                'Pulse Width (samples)',
-                'Average PRF (Hz)',
-                'PRF Std Dev (Hz)',
-                'Staggered',
-                'Threshold (dB)',
-                'Peak Power (dB)',
+        workflow.add_text(f"Reshaped to {num_windows} × {shortest_pri_samples} samples")
+        
+        # Create 2D heatmap
+        windows_2d_db = 10 * np.log10(np.abs(windows_2d) ** 2 + 1e-12)
+        
+        # Downsample for rendering
+        heatmap_data, skip_x, skip_y = downsample_heatmap(windows_2d_db, max_width=2000, max_height=1000)
+        workflow.add_text(f"Heatmap shape: {windows_2d_db.shape} → {heatmap_data.shape} (downsampled {skip_x}x{skip_y})")
+        
+        # Time axes for heatmap
+        fast_time_us = np.arange(heatmap_data.shape[1]) * skip_x / sample_rate_hz * 1e6
+        window_numbers = np.arange(heatmap_data.shape[0]) * skip_y
+        
+        fig2 = go.Figure(data=go.Heatmap(
+            z=heatmap_data,
+            x=fast_time_us,
+            y=window_numbers,
+            colorscale='HSV',
+            colorbar=dict(title='Power (dB)'),
+            zmin=heatmap_data.min(),
+            zmax=heatmap_data.max(),
+        ))
+        fig2.update_layout(
+            title=f"Reshaped Pulse Array (Fixed {max_prf_hz} Hz Sampling)",
+            xaxis_title="Fast Time (μs)",
+            yaxis_title="Window Number",
+            template='plotly_dark',
+            height=700,
+            updatemenus=[
+                dict(
+                    type="buttons",
+                    direction="left",
+                    buttons=[
+                        dict(label="Auto", method="relayout", args=[{"coloraxis.cmin": None, "coloraxis.cmax": None}]),
+                        dict(label="Full", method="relayout", args=[{"coloraxis.cmin": heatmap_data.min(), "coloraxis.cmax": heatmap_data.max()}]),
+                    ],
+                    pad={"r": 10, "t": 10},
+                    showactive=True,
+                    x=0.01,
+                    xanchor="left",
+                    y=1.15,
+                    yanchor="top"
+                ),
             ],
-            'Value': [
-                f"{num_pulses}",
-                f"{num_valid}",
-                f"{samples_per_pulse}" if samples_per_pulse > 0 else "N/A",
-                f"{detection_info['avg_prf_hz']:.2f}" if num_pulses > 1 else "N/A",
-                f"{detection_info['std_prf_hz']:.2f}" if num_pulses > 1 else "N/A",
-                "Yes" if detection_info.get('is_staggered') else "No",
-                f"{detection_info['threshold_db']:.1f}",
-                f"{detection_info['peak_power_db']:.1f}",
+            sliders=[
+                dict(
+                    active=100,
+                    yanchor="top",
+                    y=-0.1,
+                    xanchor="left",
+                    currentvalue=dict(prefix="Color Max: ", visible=True, xanchor="right"),
+                    pad=dict(b=10, t=50),
+                    len=0.45,
+                    x=0.0,
+                    steps=[
+                        dict(method="relayout", args=[{"coloraxis.cmax": heatmap_data.min() + i * (heatmap_data.max() - heatmap_data.min()) / 100}], label=f"{heatmap_data.min() + i * (heatmap_data.max() - heatmap_data.min()) / 100:.1f}")
+                        for i in range(101)
+                    ]
+                ),
+                dict(
+                    active=0,
+                    yanchor="top",
+                    y=-0.1,
+                    xanchor="right",
+                    currentvalue=dict(prefix="Color Min: ", visible=True, xanchor="left"),
+                    pad=dict(b=10, t=50),
+                    len=0.45,
+                    x=1.0,
+                    steps=[
+                        dict(method="relayout", args=[{"coloraxis.cmin": heatmap_data.min() + i * (heatmap_data.max() - heatmap_data.min()) / 100}], label=f"{heatmap_data.min() + i * (heatmap_data.max() - heatmap_data.min()) / 100:.1f}")
+                        for i in range(101)
+                    ]
+                ),
             ]
-        }
-        workflow.add_table("Pulse Extraction Statistics", stats_table)
-        
-        # Step 4: Create visualization (always show energy detector plot)
-        num_plots = 2 if num_pulses == 0 else 4  # Show fewer plots if no pulses detected
-        
-        if num_pulses == 0:
-            # Just show energy detector output
-            fig = make_subplots(
-                rows=2, cols=1,
-                subplot_titles=(
-                    'Energy Detector Output (Full View)',
-                    'Energy Detector Output (Zoom)',
-                ),
-                vertical_spacing=0.12,
-                row_heights=[0.5, 0.5]
-            )
-        else:
-            fig = make_subplots(
-                rows=4, cols=1,
-                subplot_titles=(
-                    'Power Envelope with Detection Threshold',
-                    'Detected Pulse Starts (Zoom)',
-                    'Pulse Timing Diagram (PRI)',
-                    'Extracted Pulse Stack (Range vs Pulse)'
-                ),
-                vertical_spacing=0.08,
-                row_heights=[0.25, 0.25, 0.2, 0.3]
-            )
-        
-        # Plot 1: Energy detector output with threshold
-        time_axis = np.arange(total_samples) / sample_rate_hz
-        
-        # Check if we have matched filter output
-        mf_output_db = detection_info.get('mf_output_db')
-        if mf_output_db is not None:
-            # Use matched filter output
-            plot_title_1 = 'Matched Filter Output with Detection Threshold'
-            plot_title_2 = 'Matched Filter Output (Zoom)'
-            power_to_plot = mf_output_db
-        else:
-            # Use smoothed power from energy detector
-            plot_title_1 = 'Energy Detector Output (Full View)'
-            plot_title_2 = 'Energy Detector Output (Zoom)'
-            smoothed_power_db = detection_info.get('smoothed_power_db')
-            if smoothed_power_db is None:
-                # Fallback if not available
-                power = np.abs(signal_data.ravel()) ** 2
-                power_to_plot = 10 * np.log10(power + 1e-12)
-            else:
-                power_to_plot = smoothed_power_db
-        
-        # Update subplot titles
-        if num_pulses == 0:
-            fig = make_subplots(
-                rows=2, cols=1,
-                subplot_titles=(plot_title_1, plot_title_2),
-                vertical_spacing=0.12,
-                row_heights=[0.5, 0.5]
-            )
-        else:
-            fig = make_subplots(
-                rows=4, cols=1,
-                subplot_titles=(
-                    plot_title_1,
-                    plot_title_2,
-                    'Pulse Timing Diagram (PRI)',
-                    'Extracted Pulse Stack (Range vs Pulse)'
-                ),
-                vertical_spacing=0.08,
-                row_heights=[0.25, 0.25, 0.2, 0.3]
-            )
-        
-        # Downsample for plotting if too many samples
-        plot_decimation = max(1, total_samples // 10000)
-        time_plot = time_axis[::plot_decimation]
-        power_plot = power_to_plot[::plot_decimation]
-        
-        # Main trace (matched filter or energy detector)
-        fig.add_trace(
-            go.Scatter(
-                x=time_plot * 1000,  # ms
-                y=power_plot,
-                mode='lines',
-                name='MF Output' if mf_output_db is not None else 'Energy Detector',
-                line=dict(color='cyan', width=1),
-                opacity=0.8,
-                showlegend=True
-            ),
-            row=1, col=1
         )
+        workflow.add_plot(fig2)
+
+        # Compute PPC to find offsets between consecutive pulses
+        workflow.add_text("\n=== Pulse Detection & Filtering ===")
         
-        # Threshold line
-        fig.add_hline(
-            y=detection_info['threshold_db'],
-            line=dict(color='red', dash='dash', width=2),
-            annotation_text=f"Threshold: {detection_info['threshold_db']:.1f} dB",
-            annotation_position="right",
-            row=1, col=1
-        )
-        # Peak power line
-        fig.add_hline(
-            y=detection_info['peak_power_db'],
-            line=dict(color='green', dash='dot', width=1),
-            annotation_text=f"Peak: {detection_info['peak_power_db']:.1f} dB",
-            annotation_position="right",
-            row=1, col=1
-        )
+        # Use k-means clustering to separate pulses from null/empty windows
+        window_powers = np.mean(np.abs(windows_2d), axis=1)
         
-        # Mark detected pulse starts
-        fig.add_trace(
-            go.Scatter(
-                x=pulse_start_times * 1000,  # ms
-                y=[detection_info['peak_power_db']] * len(pulse_start_times),
+        # Fit k-means with 2 clusters
+        kmeans = KMeans(n_clusters=2, random_state=42, n_init=10)
+        cluster_labels = kmeans.fit_predict(window_powers.reshape(-1, 1))
+        cluster_centers = kmeans.cluster_centers_.flatten()
+        
+        # Determine which cluster is the null/empty pulses (lower power)
+        null_cluster = np.argmin(cluster_centers)
+        pulse_cluster = 1 - null_cluster
+        
+        # Mark windows in the larger power cluster as having pulses
+        has_pulse = (cluster_labels == pulse_cluster)
+        
+        # Track the original window number and start time for each pulse
+        pulse_window_indices = np.where(has_pulse)[0]
+        num_pulses = len(pulse_window_indices)
+        
+        # Start time of each window in seconds
+        window_start_times_s = np.arange(num_windows) * shortest_pri_samples / sample_rate_hz
+        pulse_start_times_s = window_start_times_s[pulse_window_indices]
+        
+        # Compute cluster boundary as threshold for display
+        power_threshold = (cluster_centers[null_cluster] + cluster_centers[pulse_cluster]) / 2
+        
+        workflow.add_text([
+            f"Total windows: {num_windows}",
+            f"Windows with pulses: {num_pulses}",
+            f"Empty windows (rejected): {num_windows - num_pulses}",
+            f"Null cluster center: {10*np.log10(cluster_centers[null_cluster]**2 + 1e-12):.1f} dB",
+            f"Pulse cluster center: {10*np.log10(cluster_centers[pulse_cluster]**2 + 1e-12):.1f} dB",
+            f"Decision boundary: {10*np.log10(power_threshold**2 + 1e-12):.1f} dB",
+        ])
+        
+        # Plot window power statistic vs. k-means clusters
+        window_powers_db = 10 * np.log10(window_powers**2 + 1e-12)
+        threshold_db = 10 * np.log10(power_threshold**2 + 1e-12)
+        
+        fig2b = go.Figure()
+        
+        # Plot rejected windows (below threshold)
+        rejected_indices = np.where(~has_pulse)[0]
+        if len(rejected_indices) > 0:
+            fig2b.add_trace(go.Scatter(
+                x=rejected_indices,
+                y=window_powers_db[rejected_indices],
                 mode='markers',
-                name=f'Detected Pulses ({num_pulses})',
-                marker=dict(color='yellow', size=6, symbol='x', line=dict(width=1, color='orange')),
-                showlegend=True
-            ),
-            row=1, col=1
-        )
+                name='Rejected (Empty)',
+                marker=dict(color='red', size=4, opacity=0.6)
+            ))
         
-        # Plot 2: Zoomed view of first few pulses showing threshold behavior
-        # Show first 10 pulses or first 50ms, whichever is less
-        zoom_time = 0.05  # 50ms
-        zoom_samples = int(zoom_time * sample_rate_hz)
-        zoom_decimation = max(1, zoom_samples // 5000)
+        # Plot accepted windows (above threshold)
+        accepted_indices = np.where(has_pulse)[0]
+        if len(accepted_indices) > 0:
+            fig2b.add_trace(go.Scatter(
+                x=accepted_indices,
+                y=window_powers_db[accepted_indices],
+                mode='markers',
+                name='Accepted (Pulse)',
+                marker=dict(color='cyan', size=4)
+            ))
         
-        time_zoom = time_axis[:zoom_samples:zoom_decimation]
-        power_zoom = power_to_plot[:zoom_samples:zoom_decimation]
+        # Add decision boundary line
+        fig2b.add_trace(go.Scatter(
+            x=[0, num_windows-1],
+            y=[threshold_db, threshold_db],
+            mode='lines',
+            name=f'Decision Boundary ({threshold_db:.1f} dB)',
+            line=dict(color='yellow', width=2, dash='dash')
+        ))
         
-        # Matched filter or energy detector
-        fig.add_trace(
-            go.Scatter(
-                x=time_zoom * 1000,
-                y=power_zoom,
-                mode='lines',
-                name='MF Output' if mf_output_db is not None else 'Energy Detector',
-                line=dict(color='cyan', width=1.5),
-                showlegend=False
-            ),
-            row=2, col=1
-        )
-        
-        # Threshold in zoom
-        fig.add_hline(
-            y=detection_info['threshold_db'],
-            line=dict(color='red', dash='dash', width=2),
-            row=2, col=1
-        )
-        
-        # Mark pulses in zoom window if any detected
-        if num_pulses > 0:
-            zoom_pulses = pulse_start_times[pulse_start_times < zoom_time]
-            if len(zoom_pulses) > 0:
-                fig.add_trace(
-                    go.Scatter(
-                        x=zoom_pulses * 1000,
-                        y=[detection_info['peak_power_db']] * len(zoom_pulses),
-                        mode='markers',
-                        name='Pulse Starts',
-                        marker=dict(color='yellow', size=10, symbol='x', line=dict(width=2, color='orange')),
-                        showlegend=False
-                    ),
-                    row=2, col=1
-                )
-        
-        # Plot 3: Pulse timing diagram (PRI vs pulse number) - only if pulses detected
-        if num_pulses > 1:
-            pris = np.diff(pulse_start_times) * 1000  # ms
-            pulse_numbers = np.arange(1, len(pris) + 1)
-            avg_pri_ms = detection_info['avg_pri_sec'] * 1000
-            
-            fig.add_trace(
-                go.Scatter(
-                    x=pulse_numbers,
-                    y=pris,
-                    mode='lines+markers',
-                    name='PRI',
-                    line=dict(color='magenta', width=2),
-                    marker=dict(size=6),
-                    showlegend=False
-                ),
-                row=3, col=1
-            )
-            
-            # Average PRI line
-            fig.add_hline(
-                y=avg_pri_ms,
-                line=dict(color='orange', dash='dash', width=1),
-                annotation_text=f"Avg: {avg_pri_ms:.2f} ms",
-                annotation_position="right",
-                row=3, col=1
-            )
-        
-        # Plot 4: Pulse stack heatmap - only if pulses detected and extracted
-        if num_pulses > 0 and pulse_stack is not None:
-            pulse_stack_db = 20 * np.log10(np.abs(pulse_stack) + 1e-10)
-            
-            fig.add_trace(
-                go.Heatmap(
-                    z=pulse_stack_db,
-                    x=np.arange(samples_per_pulse),
-                    y=np.arange(num_valid),
-                    colorscale='Viridis',
-                    colorbar=dict(title='dB', y=0.15, len=0.3),
-                    name='Pulse Stack',
-                    showscale=True
-                ),
-                row=4, col=1
-            )
-        
-        # Update axes
-        fig.update_xaxes(title_text="Time (ms)", row=1, col=1)
-        fig.update_yaxes(title_text="Power (dB)", row=1, col=1)
-        
-        fig.update_xaxes(title_text="Time (ms)", row=2, col=1)
-        fig.update_yaxes(title_text="Power (dB)", row=2, col=1)
-        
-        fig.update_xaxes(title_text="Pulse Number", row=3, col=1)
-        fig.update_yaxes(title_text="PRI (ms)", row=3, col=1)
-        
-        fig.update_xaxes(title_text="Range Sample", row=4, col=1)
-        fig.update_yaxes(title_text="Pulse Number", row=4, col=1)
-        
-        fig.update_layout(
-            template="plotly_dark",
-            title_text="Pulse Extraction Results",
-            height=1200,
+        fig2b.update_layout(
+            title="Window Power Statistics (K-Means Clustering, k=2)",
+            xaxis_title="Window Number",
+            yaxis_title="Mean Power (dB)",
+            template='plotly_dark',
+            height=600,
             showlegend=True
         )
+        workflow.add_plot(fig2b)
         
-        workflow.add_plot(fig)
+        # Extract only the windows with pulses
+        pulses_2d = windows_2d[pulse_window_indices, :]
         
+        # Create heatmap of accepted pulses only (compact, no empty windows)
+        pulses_2d_db = 10 * np.log10(np.abs(pulses_2d) ** 2 + 1e-12)
+        
+        # Downsample for rendering
+        heatmap_pulses, skip_x_p, skip_y_p = downsample_heatmap(pulses_2d_db, max_width=2000, max_height=1000)
+        workflow.add_text(f"Pulses-only heatmap: {pulses_2d_db.shape} → {heatmap_pulses.shape} (downsampled {skip_x_p}x{skip_y_p})")
+        
+        # Time axes for pulses heatmap
+        fast_time_pulses_us = np.arange(heatmap_pulses.shape[1]) * skip_x_p / sample_rate_hz * 1e6
+        pulse_indices = np.arange(heatmap_pulses.shape[0]) * skip_y_p
+        
+        fig2c = go.Figure(data=go.Heatmap(
+            z=heatmap_pulses,
+            x=fast_time_pulses_us,
+            y=pulse_indices,
+            colorscale='HSV',
+            colorbar=dict(title='Power (dB)'),
+            zmin=heatmap_pulses.min(),
+            zmax=heatmap_pulses.max(),
+        ))
+        fig2c.update_layout(
+            title=f"Accepted Pulses Only (Empty Windows Removed, n={num_pulses})",
+            xaxis_title="Fast Time (μs)",
+            yaxis_title="Pulse Number (Compact)",
+            template='plotly_dark',
+            height=700,
+            updatemenus=[
+                dict(
+                    type="buttons",
+                    direction="left",
+                    buttons=[
+                        dict(label="Auto", method="relayout", args=[{"coloraxis.cmin": None, "coloraxis.cmax": None}]),
+                        dict(label="Full", method="relayout", args=[{"coloraxis.cmin": heatmap_pulses.min(), "coloraxis.cmax": heatmap_pulses.max()}]),
+                    ],
+                    pad={"r": 10, "t": 10},
+                    showactive=True,
+                    x=0.01,
+                    xanchor="left",
+                    y=1.15,
+                    yanchor="top"
+                ),
+            ],
+            sliders=[
+                dict(
+                    active=100,
+                    yanchor="top",
+                    y=-0.1,
+                    xanchor="left",
+                    currentvalue=dict(prefix="Color Max: ", visible=True, xanchor="right"),
+                    pad=dict(b=10, t=50),
+                    len=0.45,
+                    x=0.0,
+                    steps=[
+                        dict(method="relayout", args=[{"coloraxis.cmax": heatmap_pulses.min() + i * (heatmap_pulses.max() - heatmap_pulses.min()) / 100}], label=f"{heatmap_pulses.min() + i * (heatmap_pulses.max() - heatmap_pulses.min()) / 100:.1f}")
+                        for i in range(101)
+                    ]
+                ),
+                dict(
+                    active=0,
+                    yanchor="top",
+                    y=-0.1,
+                    xanchor="right",
+                    currentvalue=dict(prefix="Color Min: ", visible=True, xanchor="left"),
+                    pad=dict(b=10, t=50),
+                    len=0.45,
+                    x=1.0,
+                    steps=[
+                        dict(method="relayout", args=[{"coloraxis.cmin": heatmap_pulses.min() + i * (heatmap_pulses.max() - heatmap_pulses.min()) / 100}], label=f"{heatmap_pulses.min() + i * (heatmap_pulses.max() - heatmap_pulses.min()) / 100:.1f}")
+                        for i in range(101)
+                    ]
+                ),
+            ]
+        )
+        workflow.add_plot(fig2c)
+        
+        workflow.add_text("\n=== Pulse Pair Correlation ===")
+        
+        # Now do PPC on consecutive pulses (in the filtered list)
+        num_pulse_pairs = num_pulses - 1
+        peak_lags = np.zeros(num_pulse_pairs, dtype=int)
+        peak_values = np.zeros(num_pulse_pairs)
+        
+        for i in range(num_pulse_pairs):
+            # Correlate consecutive pulses
+            corr = correlate(pulses_2d[i+1, :], np.conj(pulses_2d[i, :]), mode='same', method='fft')
+            corr_mag = np.abs(corr)
+            
+            # Find peak lag
+            peak_idx = np.argmax(corr_mag)
+            lag = peak_idx - len(corr_mag) // 2  # Lag relative to center
+            
+            # Unwrap: convert to modulo window length, keep in [0, shortest_pri_samples)
+            lag_unwrapped = lag % shortest_pri_samples
+            
+            peak_lags[i] = lag_unwrapped
+            peak_values[i] = corr_mag[peak_idx]
+        
+        # Convert lags to time
+        peak_lags_us = peak_lags / sample_rate_hz * 1e6
+        
+        workflow.add_text([
+            f"Pulse pairs analyzed: {num_pulse_pairs}",
+            f"Peak lag range: {peak_lags.min()} to {peak_lags.max()} samples",
+        ])
+        
+        # Plot PPC offsets
+        if num_pulse_pairs > 0:
+            fig3 = go.Figure()
+            fig3.add_trace(go.Scatter(
+                x=np.arange(num_pulse_pairs),
+                y=peak_lags_us,
+                mode='markers',
+                name='PPC Offsets',
+                marker=dict(color='cyan', size=4),
+                text=[f"Windows {pulse_window_indices[i]} → {pulse_window_indices[i+1]}" 
+                      for i in range(num_pulse_pairs)],
+                hovertemplate='Pulse Pair %{x}<br>Lag: %{y:.2f} μs<br>%{text}<extra></extra>'
+            ))
+            fig3.update_layout(
+                title="PPC Peak Offsets Between Consecutive Pulses (Empty Windows Filtered)",
+                xaxis_title="Pulse Pair Number",
+                yaxis_title="Offset (μs)",
+                template='plotly_dark',
+                height=600
+            )
+            workflow.add_plot(fig3)
+
+        # Align pulses using cumulative offsets
+        workflow.add_text("\n=== Pulse Timing Analysis ===")
+        
+        # For each pulse, detect where the pulse peak is within its window
+        # This gives us the intra-window offset (where the pulse actually starts)
+        intra_window_offsets = np.zeros(num_pulses, dtype=int)
+        for i in range(num_pulses):
+            pulse_mag = np.abs(pulses_2d[i, :])
+            peak_idx = np.argmax(pulse_mag)
+            intra_window_offsets[i] = peak_idx
+        
+        # Raw start times are based on fixed PRF sampling (window start)
+        raw_start_times_us = pulse_start_times_s * 1e6  # Convert to microseconds
+        
+        # Real start times = window start + intra-window offset
+        intra_window_offsets_us = intra_window_offsets / sample_rate_hz * 1e6
+        real_start_times_us = raw_start_times_us + intra_window_offsets_us
+        
+        # Compute differences (actual position within window)
+        time_correction_us = intra_window_offsets_us
+        
+        workflow.add_text([
+            f"Raw start time range: {raw_start_times_us[0]:.2f} to {raw_start_times_us[-1]:.2f} μs",
+            f"Intra-window offset range: {intra_window_offsets_us.min():.2f} to {intra_window_offsets_us.max():.2f} μs",
+            f"Real start time range: {real_start_times_us[0]:.2f} to {real_start_times_us[-1]:.2f} μs",
+        ])
+        
+        # Compute PRIs (time between consecutive pulses)
+        if num_pulses > 1:
+            pris_us = np.diff(real_start_times_us)
+            workflow.add_text([
+                f"PRI range: {pris_us.min():.2f} to {pris_us.max():.2f} μs",
+                f"PRI mean: {pris_us.mean():.2f} μs",
+                f"Corresponding PRF range: {1e6/pris_us.max():.1f} to {1e6/pris_us.min():.1f} Hz",
+            ])
+        
+        # Plot raw vs real start times
+        fig3b = go.Figure()
+        fig3b.add_trace(go.Scatter(
+            x=np.arange(num_pulses),
+            y=raw_start_times_us,
+            mode='markers',
+            name='Raw Start Times (Window Start)',
+            marker=dict(color='red', size=4, opacity=0.6)
+        ))
+        fig3b.add_trace(go.Scatter(
+            x=np.arange(num_pulses),
+            y=real_start_times_us,
+            mode='markers',
+            name='Real Start Times (Peak Position)',
+            marker=dict(color='cyan', size=4)
+        ))
+        fig3b.update_layout(
+            title="Pulse Start Times: Window Start vs. Actual Peak Position",
+            xaxis_title="Pulse Number",
+            yaxis_title="Start Time (μs)",
+            template='plotly_dark',
+            height=600,
+            showlegend=True
+        )
+        workflow.add_plot(fig3b)
+        
+        # Plot intra-window offsets
+        fig3c = go.Figure()
+        fig3c.add_trace(go.Scatter(
+            x=np.arange(num_pulses),
+            y=intra_window_offsets_us,
+            mode='markers',
+            name='Intra-Window Offset',
+            marker=dict(color='magenta', size=4)
+        ))
+        fig3c.update_layout(
+            title="Pulse Peak Position Within Each Window",
+            xaxis_title="Pulse Number",
+            yaxis_title="Offset from Window Start (μs)",
+            template='plotly_dark',
+            height=600
+        )
+        workflow.add_plot(fig3c)
+        
+        # Plot PRIs
+        if num_pulses > 1:
+            fig3d = go.Figure()
+            fig3d.add_trace(go.Scatter(
+                x=np.arange(num_pulses - 1),
+                y=pris_us,
+                mode='markers+lines',
+                name='PRI',
+                marker=dict(color='cyan', size=4),
+                line=dict(color='cyan', width=1)
+            ))
+            # Add reference lines for min/max PRF
+            min_pri_us = 1e6 / max_prf_hz
+            max_pri_us = 1e6 / min_prf_hz
+            fig3d.add_trace(go.Scatter(
+                x=[0, num_pulses-2],
+                y=[min_pri_us, min_pri_us],
+                mode='lines',
+                name=f'Min PRI ({min_pri_us:.1f} μs, {max_prf_hz} Hz)',
+                line=dict(color='yellow', width=1, dash='dash')
+            ))
+            fig3d.add_trace(go.Scatter(
+                x=[0, num_pulses-2],
+                y=[max_pri_us, max_pri_us],
+                mode='lines',
+                name=f'Max PRI ({max_pri_us:.1f} μs, {min_prf_hz} Hz)',
+                line=dict(color='orange', width=1, dash='dash')
+            ))
+            fig3d.update_layout(
+                title="Pulse Repetition Intervals (PRI) Between Consecutive Pulses",
+                xaxis_title="Pulse Pair Number",
+                yaxis_title="PRI (μs)",
+                template='plotly_dark',
+                height=600,
+                showlegend=True
+            )
+            workflow.add_plot(fig3d)
+        
+        workflow.add_text("\n=== PRI-Based Pulse Extraction ===")
+        
+        # Use the estimated PRIs to re-extract pulses from the MF output at correct positions
+        # Start with the first detected pulse position
+        first_pulse_sample = int(pulse_window_indices[0] * shortest_pri_samples + intra_window_offsets[0])
+        
+        workflow.add_text([
+            f"First pulse position: {first_pulse_sample} samples ({first_pulse_sample/sample_rate_hz*1e6:.2f} μs)",
+            f"Re-extracting pulses using estimated PRIs...",
+        ])
+        
+        # Build pulse extraction positions based on PRIs
+        pulse_positions_samples = [first_pulse_sample]
+        for i in range(num_pulses - 1):
+            pri_samples = int(pris_us[i] * sample_rate_hz / 1e6)
+            next_position = pulse_positions_samples[-1] + pri_samples
+            pulse_positions_samples.append(next_position)
+        
+        pulse_positions_samples = np.array(pulse_positions_samples)
+        
+        # Define extraction window size (use longest PRI as window size)
+        extraction_window_samples = int(np.max(pris_us) * sample_rate_hz / 1e6) if num_pulses > 1 else shortest_pri_samples
+        
+        workflow.add_text([
+            f"Extraction window size: {extraction_window_samples} samples ({extraction_window_samples/sample_rate_hz*1e6:.2f} μs)",
+            f"Extracting {num_pulses} pulses from matched filter output...",
+        ])
+        
+        # Extract pulses from MF output at the computed positions
+        pulses_extracted = np.zeros((num_pulses, extraction_window_samples), dtype=complex)
+        for i in range(num_pulses):
+            start_idx = pulse_positions_samples[i]
+            end_idx = start_idx + extraction_window_samples
+            
+            # Handle edge cases
+            if end_idx <= len(mf_output):
+                pulses_extracted[i, :] = mf_output[start_idx:end_idx]
+            else:
+                # Pulse extends beyond data, pad with zeros
+                available = len(mf_output) - start_idx
+                if available > 0:
+                    pulses_extracted[i, :available] = mf_output[start_idx:]
+        
+        # Create heatmap of PRI-extracted pulses
+        pulses_extracted_db = 10 * np.log10(np.abs(pulses_extracted) ** 2 + 1e-12)
+        
+        # Downsample for rendering
+        heatmap_extracted, skip_x_e, skip_y_e = downsample_heatmap(pulses_extracted_db, max_width=2000, max_height=1000)
+        workflow.add_text(f"PRI-extracted heatmap: {pulses_extracted_db.shape} → {heatmap_extracted.shape} (downsampled {skip_x_e}x{skip_y_e})")
+        
+        # Time axes for extracted pulses heatmap
+        fast_time_extracted_us = np.arange(heatmap_extracted.shape[1]) * skip_x_e / sample_rate_hz * 1e6
+        pulse_indices_extracted = np.arange(heatmap_extracted.shape[0]) * skip_y_e
+        
+        fig4 = go.Figure(data=go.Heatmap(
+            z=heatmap_extracted,
+            x=fast_time_extracted_us,
+            y=pulse_indices_extracted,
+            colorscale='HSV',
+            colorbar=dict(title='Power (dB)'),
+            zmin=heatmap_extracted.min(),
+            zmax=heatmap_extracted.max(),
+        ))
+        fig4.update_layout(
+            title=f"PRI-Based Extracted Pulses (n={num_pulses}, Pre-Aligned)",
+            xaxis_title="Fast Time (μs)",
+            yaxis_title="Pulse Number",
+            template='plotly_dark',
+            height=700,
+            updatemenus=[
+                dict(
+                    type="buttons",
+                    direction="left",
+                    buttons=[
+                        dict(label="Auto", method="relayout", args=[{"coloraxis.cmin": None, "coloraxis.cmax": None}]),
+                        dict(label="Full", method="relayout", args=[{"coloraxis.cmin": heatmap_extracted.min(), "coloraxis.cmax": heatmap_extracted.max()}]),
+                    ],
+                    pad={"r": 10, "t": 10},
+                    showactive=True,
+                    x=0.01,
+                    xanchor="left",
+                    y=1.15,
+                    yanchor="top"
+                ),
+            ],
+            sliders=[
+                dict(
+                    active=100,
+                    yanchor="top",
+                    y=-0.1,
+                    xanchor="left",
+                    currentvalue=dict(prefix="Color Max: ", visible=True, xanchor="right"),
+                    pad=dict(b=10, t=50),
+                    len=0.45,
+                    x=0.0,
+                    steps=[
+                        dict(method="relayout", args=[{"coloraxis.cmax": heatmap_extracted.min() + i * (heatmap_extracted.max() - heatmap_extracted.min()) / 100}], label=f"{heatmap_extracted.min() + i * (heatmap_extracted.max() - heatmap_extracted.min()) / 100:.1f}")
+                        for i in range(101)
+                    ]
+                ),
+                dict(
+                    active=0,
+                    yanchor="top",
+                    y=-0.1,
+                    xanchor="right",
+                    currentvalue=dict(prefix="Color Min: ", visible=True, xanchor="left"),
+                    pad=dict(b=10, t=50),
+                    len=0.45,
+                    x=1.0,
+                    steps=[
+                        dict(method="relayout", args=[{"coloraxis.cmin": heatmap_extracted.min() + i * (heatmap_extracted.max() - heatmap_extracted.min()) / 100}], label=f"{heatmap_extracted.min() + i * (heatmap_extracted.max() - heatmap_extracted.min()) / 100:.1f}")
+                        for i in range(101)
+                    ]
+                ),
+            ]
+        )
+        workflow.add_plot(fig4)
+
+        # Motion compensation - align peaks in range before Doppler compression
+        workflow.add_text("\n=== Motion Compensation (Range Cell Migration Correction) ===")
+        
+        # Find peak in each pulse (search in first 20 μs where targets are)
+        search_range = min(2000, extraction_window_samples)  # 20 μs at 100 MHz
+        peak_positions = np.zeros(num_pulses, dtype=int)
+        peak_values = np.zeros(num_pulses)
+        
+        for i in range(num_pulses):
+            pulse_mag = np.abs(pulses_extracted[i, :search_range])
+            peak_idx = np.argmax(pulse_mag)
+            peak_positions[i] = peak_idx
+            peak_values[i] = pulse_mag[peak_idx]
+        
+        # Use median peak position as reference
+        ref_peak_pos = int(np.median(peak_positions))
+        
+        workflow.add_text([
+            f"Peak positions in pulses:",
+            f"  Range: {peak_positions.min()} - {peak_positions.max()} samples",
+            f"  Median: {ref_peak_pos} samples ({ref_peak_pos/sample_rate_hz*1e6:.2f} μs)",
+            f"  Std dev: {np.std(peak_positions):.2f} samples ({np.std(peak_positions)/sample_rate_hz*1e6:.3f} μs)",
+            f"  Migration span: {(peak_positions.max() - peak_positions.min())/sample_rate_hz*1e6:.3f} μs",
+        ])
+        
+        # Align pulses by shifting to common peak position
+        pulses_aligned = np.zeros_like(pulses_extracted, dtype=complex)
+        for i in range(num_pulses):
+            shift = ref_peak_pos - peak_positions[i]
+            if shift >= 0:
+                # Shift right
+                end = min(shift + extraction_window_samples, extraction_window_samples)
+                copy_len = end - shift
+                pulses_aligned[i, shift:end] = pulses_extracted[i, :copy_len]
+            else:
+                # Shift left
+                start = -shift
+                copy_len = min(extraction_window_samples + shift, extraction_window_samples)
+                pulses_aligned[i, :copy_len] = pulses_extracted[i, start:start+copy_len]
+        
+        workflow.add_text("✓ Pulses aligned to median peak position")
+
+        # Doppler compression on motion-compensated pulses using NUFFT
+        workflow.add_text("\n=== Doppler Compression (NUFFT for Non-Uniform Timing) ===")
+        
+        # Use the actual pulse positions (in samples) from PRI-based extraction
+        pulse_times_s = pulse_positions_samples / sample_rate_hz
+        
+        # Make times relative to first pulse
+        pulse_times_relative_s = pulse_times_s - pulse_times_s[0]
+        t_span = pulse_times_relative_s[-1]
+        
+        # Apply window function across slow time (Kaiser has better sidelobe suppression)
+        slow_time_window = np.kaiser(num_pulses, beta=8.6)  # beta=8.6 gives ~-60dB sidelobes
+        
+        # Compute Doppler parameters
+        num_doppler_bins = num_pulses
+        avg_pri_s = np.mean(pris_us) / 1e6 if num_pulses > 1 else 1.0
+        doppler_resolution_hz = 1.0 / t_span if t_span > 0 else 1.0
+        
+        # For non-uniform sampling, the unambiguous Doppler range is approximately
+        # determined by the average PRF, but with stagger we get spectral artifacts
+        avg_prf = 1.0 / avg_pri_s
+        nyquist_doppler = avg_prf / 2.0
+        
+        # The output frequency grid
+        doppler_freqs_hz = np.fft.fftfreq(num_doppler_bins, t_span / num_doppler_bins)
+        
+        workflow.add_text([
+            f"Number of pulses: {num_pulses}",
+            f"Observation time span: {t_span*1e6:.2f} μs ({t_span*1e3:.2f} ms)",
+            f"Average PRI: {avg_pri_s*1e6:.2f} μs",
+            f"Average PRF: {avg_prf:.1f} Hz",
+            f"Nyquist Doppler (avg PRF): ±{nyquist_doppler:.1f} Hz",
+            f"Doppler resolution: {doppler_resolution_hz:.2f} Hz",
+            f"Using pulse positions from PRI-based extraction",
+            f"Window: Kaiser (β=8.6, ~-60dB sidelobes)",
+        ])
+        
+        # Use more range bins - up to 10000 or available
+        max_range_bins = min(10000, extraction_window_samples)
+        pulses_trimmed = pulses_aligned[:, :max_range_bins]
+        num_range_bins = pulses_trimmed.shape[1]
+        
+        workflow.add_text([
+            f"Processing {num_range_bins} range bins ({num_range_bins/sample_rate_hz*1e6:.2f} μs)",
+        ])
+        
+        # Apply NUFFT using direct computation (more reliable)
+        range_doppler = np.zeros((num_doppler_bins, num_range_bins), dtype=complex)
+        
+        # Compute NUFFT: F[k] = sum_j c_j * exp(-2πi * f_k * t_j)
+        print(f"  Computing NUFFT for {num_range_bins} range bins...")
+        for range_bin in range(num_range_bins):
+            if range_bin % 1000 == 0:
+                print(f"    Progress: {range_bin}/{num_range_bins}")
+            
+            # Get signal across all pulses for this range bin
+            signal = pulses_trimmed[:, range_bin] * slow_time_window
+            
+            # Direct NUFFT computation: F[k] = sum_j signal[j] * exp(-2πi * freq[k] * time[j])
+            for k, freq in enumerate(doppler_freqs_hz):
+                range_doppler[k, range_bin] = np.sum(signal * np.exp(-2j * np.pi * freq * pulse_times_relative_s))
+        
+        # Shift zero frequency to center
+        range_doppler = np.fft.fftshift(range_doppler, axes=0)
+        doppler_freqs_hz = np.fft.fftshift(doppler_freqs_hz)
+        
+        # Convert to dB
+        range_doppler_db = 10 * np.log10(np.abs(range_doppler) ** 2 + 1e-12)
+        
+        workflow.add_text([
+            f"Range-Doppler power range: {range_doppler_db.min():.1f} to {range_doppler_db.max():.1f} dB",
+            f"Range-Doppler shape: {range_doppler_db.shape}",
+        ])
+        
+        workflow.add_text([
+            f"Doppler FFT size: {num_pulses} pulses",
+            f"Average PRI: {avg_pri_s*1e6:.2f} μs",
+            f"Doppler resolution: {doppler_resolution_hz:.2f} Hz",
+            f"Doppler frequency range: {doppler_freqs_hz[0]:.1f} to {doppler_freqs_hz[-1]:.1f} Hz",
+        ])
+        
+        # Downsample for rendering
+        heatmap_rd, skip_x_rd, skip_y_rd = downsample_heatmap(range_doppler_db, max_width=2000, max_height=1000)
+        workflow.add_text(f"Range-Doppler heatmap: {range_doppler_db.shape} → {heatmap_rd.shape} (downsampled {skip_x_rd}x{skip_y_rd})")
+        
+        # Time and frequency axes
+        fast_time_rd_us = np.arange(heatmap_rd.shape[1]) * skip_x_rd / sample_rate_hz * 1e6
+        doppler_freqs_display = doppler_freqs_hz[::skip_y_rd] if skip_y_rd < len(doppler_freqs_hz) else doppler_freqs_hz
+        
+        fig5 = go.Figure(data=go.Heatmap(
+            z=heatmap_rd,
+            x=fast_time_rd_us,
+            y=doppler_freqs_display[:heatmap_rd.shape[0]],
+            colorscale='Jet',
+            colorbar=dict(title='Power (dB)'),
+        ))
+        
+        # Create slider steps for zmin and zmax
+        zmin_val = heatmap_rd.min()
+        zmax_val = heatmap_rd.max()
+        z_range = zmax_val - zmin_val
+        
+        fig5.update_layout(
+            title=f"Range-Doppler Map (NUFFT, {num_pulses} pulses, Non-Uniform Timing)",
+            xaxis_title='Range (μs)',
+            yaxis_title='Doppler (Hz)',
+            template='plotly_dark',
+            height=800,
+            sliders=[
+                dict(
+                    active=100,
+                    yanchor="top",
+                    y=-0.05,
+                    xanchor="left",
+                    currentvalue=dict(prefix="Color Max: ", visible=True, xanchor="right"),
+                    pad=dict(b=10, t=50),
+                    len=0.45,
+                    x=0.0,
+                    steps=[
+                        dict(
+                            method="restyle",
+                            args=[{"zmax": zmin_val + i * z_range / 100}],
+                            label=f"{zmin_val + i * z_range / 100:.1f}"
+                        )
+                        for i in range(101)
+                    ]
+                ),
+                dict(
+                    active=0,
+                    yanchor="top",
+                    y=-0.05,
+                    xanchor="right",
+                    currentvalue=dict(prefix="Color Min: ", visible=True, xanchor="left"),
+                    pad=dict(b=10, t=50),
+                    len=0.45,
+                    x=1.0,
+                    steps=[
+                        dict(
+                            method="restyle",
+                            args=[{"zmin": zmin_val + i * z_range / 100}],
+                            label=f"{zmin_val + i * z_range / 100:.1f}"
+                        )
+                        for i in range(101)
+                    ]
+                ),
+            ]
+        )
+        workflow.add_plot(fig5)
+
         return workflow.build()
+
+        # Detect pulse TOAs
+        workflow.add_text("\n=== Staggered PRF Analysis ===")
+        windows_2d, window_length, valid_toas = extract_toa_windowed_2d(mf_output, toa_indices, min_prf_hz, max_prf_hz, sample_rate_hz)
+        workflow.add_text([
+            f"Min PRF: {min_prf_hz} Hz (period: {1000/min_prf_hz:.3f} ms)",
+            f"Max PRF: {max_prf_hz} Hz (period: {1000/max_prf_hz:.3f} ms)",
+            f"Window length: {window_length} samples ({window_length/sample_rate_hz*1000:.3f} ms)",
+            f"Number of pulses: {windows_2d.shape[0]}",
+        ])
+
+        # Create 2D heatmap
+        windows_2d_db = 10 * np.log10(np.abs(windows_2d) ** 2 + 1e-12)
         
+        # Downsample for rendering
+        heatmap_data, skip_x, skip_y = downsample_heatmap(windows_2d_db, max_width=2000, max_height=1000)
+        workflow.add_text(f"Heatmap shape: {windows_2d_db.shape} → {heatmap_data.shape} (downsampled {skip_x}x{skip_y})")
+        
+        # Time axes for heatmap (adjusted for downsampling)
+        fast_time_us = np.arange(heatmap_data.shape[1]) * skip_x / sample_rate_hz * 1e6  # microseconds
+        pulse_numbers = np.arange(heatmap_data.shape[0]) * skip_y  # pulse index
+        
+        fig2 = go.Figure(data=go.Heatmap(
+            z=heatmap_data,
+            x=fast_time_us,
+            y=pulse_numbers,
+            colorscale='HSV',
+            colorbar=dict(title='Power (dB)'),
+        ))
+        fig2.update_layout(
+            title=f"Staggered PRF Heatmap ({min_prf_hz}-{max_prf_hz} Hz)",
+            xaxis_title="Fast Time (μs)",
+            yaxis_title="Pulse Number",
+            template='plotly_dark',
+            height=700
+        )
+        workflow.add_plot(fig2)
+
+        # Compute Pulse Pair Correlation (PPC)
+        workflow.add_text("\n=== Pulse Pair Correlation ===")
+        correlations, peak_positions, peak_values = compute_ppc_correlations(windows_2d)
+        
+        workflow.add_text([
+            f"Number of correlation pairs: {correlations.shape[0]}",
+            f"Correlation length: {correlations.shape[1]} samples",
+        ])
+        
+        # Create heatmap of correlations
+        correlations_db = 10 * np.log10(correlations + 1e-12)
+        
+        # Downsample correlations for rendering
+        corr_downsampled, skip_x_corr, skip_y_corr = downsample_heatmap(correlations_db, max_width=2000, max_height=1000)
+        workflow.add_text(f"Correlation heatmap: {correlations_db.shape} → {corr_downsampled.shape} (downsampled {skip_x_corr}x{skip_y_corr})")
+        
+        # Time axes for correlation heatmap
+        corr_lag_us = np.arange(corr_downsampled.shape[1]) * skip_x_corr / sample_rate_hz * 1e6
+        corr_pulse_pairs = np.arange(corr_downsampled.shape[0]) * skip_y_corr
+        
+        fig3 = go.Figure(data=go.Heatmap(
+            z=corr_downsampled,
+            x=corr_lag_us,
+            y=corr_pulse_pairs,
+            colorscale='HSV',
+            colorbar=dict(title='Correlation (dB)'),
+        ))
+        fig3.update_layout(
+            title="PPC Correlation Heatmap",
+            xaxis_title="Lag (μs)",
+            yaxis_title="Pulse Pair Number",
+            template='plotly_dark',
+            height=700
+        )
+        workflow.add_plot(fig3)
+
+        # Compute actual time between consecutive pulses (measured PRIs)
+        measured_pri_samples = np.diff(valid_toas)
+        measured_pri_us = measured_pri_samples / sample_rate_hz * 1e6
+        pulse_pair_numbers = np.arange(len(measured_pri_us))
+        
+        fig4 = go.Figure()
+        fig4.add_trace(go.Scatter(
+            x=pulse_pair_numbers,
+            y=measured_pri_us,
+            mode='markers',
+            name='Measured PRI',
+            marker=dict(
+                color='magenta',
+                size=3,
+            )
+        ))
+        fig4.update_layout(
+            title="Measured Pulse Repetition Intervals (PRI)",
+            xaxis_title="Pulse Pair Number",
+            yaxis_title="PRI (μs)",
+            template='plotly_dark',
+            height=600
+        )
+        workflow.add_plot(fig4)
+
+        return workflow.build()
+
     except Exception as e:
         import traceback
         traceback.print_exc()
