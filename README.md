@@ -175,6 +175,35 @@ generator = CRSDGenerator(scene)
 stats = generator.generate()
 ```
 
+## Project Structure
+
+```
+crsd-inspector/
+├── dash_app.py              # Dash web application (alternative to Streamlit)
+├── crsd_inspector/          # Main package
+│   ├── app.py              # Streamlit application  
+│   ├── cli.py              # CLI entry points
+│   └── workflows/          # Analysis workflow modules
+│       ├── pulse_extraction.py    # Pulse TOA detection & PRI analysis
+│       ├── range_doppler.py       # Range-Doppler processing
+│       └── signal_analysis.py     # Basic signal statistics
+├── crsd_generator/          # CRSD file generation tools
+│   ├── api.py              # Generator API
+│   ├── cli.py              # Generator CLI
+│   └── models.py           # Data models
+├── examples/                # Example CRSD files (not in git)
+│   ├── create_example_crsd.py  # Base generator class
+│   └── generators/         # Custom example generators
+│       ├── create_example_4.py  # Hold-and-move stagger
+│       ├── create_example_5.py  # PRF walk pattern
+│       └── create_example_6.py  # Dual-stage stagger
+└── utils/                   # Utility scripts
+    ├── analyze_prf_sequence.py   # PRF analysis tool
+    └── pulse_extraction_viewer.py # Static HTML report generator
+```
+
+**Note:** `.crsd` files are not committed to git due to their large size.
+
 ## Dependencies
 
 - **streamlit** (>=1.31.0): Web framework for interactive applications
