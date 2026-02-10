@@ -469,10 +469,10 @@ def execute_workflow(n_clicks, file_path, workflow_name, channel_id, param_value
             
             # Add workflow-specific parameters from store
             if workflow_params:
-                if 'range-window-type' in workflow_params:
-                    file_metadata['range_window'] = workflow_params['range-window-type']
-                if 'doppler-window-type' in workflow_params:
-                    file_metadata['doppler_window'] = workflow_params['doppler-window-type']
+                # Pass through all workflow parameters to metadata
+                for param_name, param_value in workflow_params.items():
+                    if param_value is not None:  # Only add non-None values
+                        file_metadata[param_name] = param_value
         
         # Execute workflow
         workflow_module = WORKFLOWS[workflow_name]
