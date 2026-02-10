@@ -244,8 +244,6 @@ def run_workflow(signal_data, metadata=None, **kwargs):
     shortest_pri_us = shortest_pri_samples / sample_rate_hz * 1e6
     
     # Create summary table
-    workflow.add_text("## Processing Parameters")
-    
     file_header_kvps = metadata.get('file_header_kvps', {})
     
     # Build summary table data
@@ -277,10 +275,7 @@ def run_workflow(signal_data, metadata=None, **kwargs):
 
     try:
         if tx_wfm is None:
-            workflow.add_text("\nError: No reference waveform provided")
             return workflow.build()
-
-        workflow.add_text("\n## Matched Filter Output")
 
         mf_output = apply_matched_filter(signal_data, tx_wfm, window_type=window_type)
         mf_output_db = 10 * np.log10(np.abs(mf_output) ** 2 + 1e-12)
@@ -303,8 +298,6 @@ def run_workflow(signal_data, metadata=None, **kwargs):
         workflow.add_plot(fig1)
 
         # Reshape data according to shortest PRI
-        workflow.add_text("\n## Fixed-PRF Pulse Array")
-        
         # Reshape: extract windows every shortest_pri samples
         num_windows = (len(mf_output) - shortest_pri_samples) // shortest_pri_samples
         windows_2d = np.zeros((num_windows, shortest_pri_samples), dtype=mf_output.dtype)
@@ -389,8 +382,6 @@ def run_workflow(signal_data, metadata=None, **kwargs):
         workflow.add_plot(fig2)
 
         # Pulse detection using k-means clustering
-        workflow.add_text("\n## Pulse Detection (K-Means Clustering)")
-        
         # Use k-means clustering to separate pulses from null/empty windows
         window_powers = np.mean(np.abs(windows_2d), axis=1)
         
@@ -416,8 +407,6 @@ def run_workflow(signal_data, metadata=None, **kwargs):
         
         # Compute cluster boundary as threshold for display
         power_threshold = (cluster_centers[null_cluster] + cluster_centers[pulse_cluster]) / 2
-        
-        workflow.add_text(f"Detected **{num_pulses}** pulses (rejected {num_windows - num_pulses} empty windows)")
         
         # Plot window power statistic vs. k-means clusters
         window_powers_db = 10 * np.log10(window_powers**2 + 1e-12)
@@ -474,7 +463,6 @@ def run_workflow(signal_data, metadata=None, **kwargs):
         
         # Downsample for rendering
         heatmap_pulses, skip_x_p, skip_y_p = downsample_heatmap(pulses_2d_db, max_width=2000, max_height=1000)
-        workflow.add_text(f"Pulses-only heatmap: {pulses_2d_db.shape} → {heatmap_pulses.shape} (downsampled {skip_x_p}x{skip_y_p})")
         
         # Time axes for pulses heatmap
         fast_time_pulses_us = np.arange(heatmap_pulses.shape[1]) * skip_x_p / sample_rate_hz * 1e6
@@ -544,8 +532,6 @@ def run_workflow(signal_data, metadata=None, **kwargs):
         )
         workflow.add_plot(fig2c)
         
-        workflow.add_text("\n## Pulse Pair Correlation")
-        
         # Now do PPC on consecutive pulses (in the filtered list)
         num_pulse_pairs = num_pulses - 1
         peak_lags = np.zeros(num_pulse_pairs, dtype=int)
@@ -592,8 +578,6 @@ def run_workflow(signal_data, metadata=None, **kwargs):
             workflow.add_plot(fig3)
 
         # Pulse timing analysis
-        workflow.add_text("\n## Pulse Timing & PRI Analysis")
-        
         # For each pulse, detect where the pulse peak is within its window
         # This gives us the intra-window offset (where the pulse actually starts)
         intra_window_offsets = np.zeros(num_pulses, dtype=int)
@@ -615,7 +599,6 @@ def run_workflow(signal_data, metadata=None, **kwargs):
         # Compute PRIs (time between consecutive pulses)
         if num_pulses > 1:
             pris_us = np.diff(real_start_times_us)
-            workflow.add_text(f"**PRI Range:** {pris_us.min():.2f} - {pris_us.max():.2f} μs  |  **PRF Range:** {1e6/pris_us.max():.1f} - {1e6/pris_us.min():.1f} Hz")
         
         # Plot raw vs real start times
         fig3b = go.Figure()
@@ -698,8 +681,6 @@ def run_workflow(signal_data, metadata=None, **kwargs):
                 showlegend=True
             )
             workflow.add_plot(fig3d)
-        
-        workflow.add_text("\n## PRI-Based Pulse Re-Extraction")
         
         # Use the estimated PRIs to re-extract pulses from the MF output at correct positions
         # Start with the first detected pulse position
@@ -807,8 +788,6 @@ def run_workflow(signal_data, metadata=None, **kwargs):
         workflow.add_plot(fig4)
 
         # Motion compensation - align peaks in range before Doppler compression
-        workflow.add_text("\n=== Motion Compensation (Range Cell Migration Correction) ===")
-        
         # Find peak in each pulse (search in first 20 μs where targets are)
         search_range = min(2000, extraction_window_samples)  # 20 μs at 100 MHz
         peak_positions = np.zeros(num_pulses, dtype=int)
@@ -822,14 +801,6 @@ def run_workflow(signal_data, metadata=None, **kwargs):
         
         # Use median peak position as reference
         ref_peak_pos = int(np.median(peak_positions))
-        
-        workflow.add_text([
-            f"Peak positions in pulses:",
-            f"  Range: {peak_positions.min()} - {peak_positions.max()} samples",
-            f"  Median: {ref_peak_pos} samples ({ref_peak_pos/sample_rate_hz*1e6:.2f} μs)",
-            f"  Std dev: {np.std(peak_positions):.2f} samples ({np.std(peak_positions)/sample_rate_hz*1e6:.3f} μs)",
-            f"  Migration span: {(peak_positions.max() - peak_positions.min())/sample_rate_hz*1e6:.3f} μs",
-        ])
         
         # Align pulses by shifting to common peak position
         pulses_aligned = np.zeros_like(pulses_extracted, dtype=complex)
@@ -845,12 +816,8 @@ def run_workflow(signal_data, metadata=None, **kwargs):
                 start = -shift
                 copy_len = min(extraction_window_samples + shift, extraction_window_samples)
                 pulses_aligned[i, :copy_len] = pulses_extracted[i, start:start+copy_len]
-        
-        workflow.add_text("✓ Pulses aligned to median peak position")
 
         # Doppler compression on motion-compensated pulses using NUFFT
-        workflow.add_text("\n=== Doppler Compression (NUFFT for Non-Uniform Timing) ===")
-        
         # Use the actual pulse positions (in samples) from PRI-based extraction
         pulse_times_s = pulse_positions_samples / sample_rate_hz
         
@@ -874,25 +841,10 @@ def run_workflow(signal_data, metadata=None, **kwargs):
         # The output frequency grid
         doppler_freqs_hz = np.fft.fftfreq(num_doppler_bins, t_span / num_doppler_bins)
         
-        workflow.add_text([
-            f"Number of pulses: {num_pulses}",
-            f"Observation time span: {t_span*1e6:.2f} μs ({t_span*1e3:.2f} ms)",
-            f"Average PRI: {avg_pri_s*1e6:.2f} μs",
-            f"Average PRF: {avg_prf:.1f} Hz",
-            f"Nyquist Doppler (avg PRF): ±{nyquist_doppler:.1f} Hz",
-            f"Doppler resolution: {doppler_resolution_hz:.2f} Hz",
-            f"Using pulse positions from PRI-based extraction",
-            f"Window: Kaiser (β=8.6, ~-60dB sidelobes)",
-        ])
-        
         # Use more range bins - up to 10000 or available
         max_range_bins = min(10000, extraction_window_samples)
         pulses_trimmed = pulses_aligned[:, :max_range_bins]
         num_range_bins = pulses_trimmed.shape[1]
-        
-        workflow.add_text([
-            f"Processing {num_range_bins} range bins ({num_range_bins/sample_rate_hz*1e6:.2f} μs)",
-        ])
         
         # Apply NUFFT using direct computation (more reliable)
         range_doppler = np.zeros((num_doppler_bins, num_range_bins), dtype=complex)
@@ -912,9 +864,6 @@ def run_workflow(signal_data, metadata=None, **kwargs):
         
         # Convert to dB
         range_doppler_db = 10 * np.log10(np.abs(range_doppler) ** 2 + 1e-12)
-        
-        workflow.add_text(f"\n## Range-Doppler Map (NUFFT)")
-        workflow.add_text(f"**Doppler Resolution:** {doppler_resolution_hz:.2f} Hz  |  **Doppler Range:** {doppler_freqs_hz[0]:.1f} - {doppler_freqs_hz[-1]:.1f} Hz")
         
         # Downsample for rendering
         heatmap_rd, skip_x_rd, skip_y_rd = downsample_heatmap(range_doppler_db, max_width=2000, max_height=1000)
@@ -982,106 +931,6 @@ def run_workflow(signal_data, metadata=None, **kwargs):
             ]
         )
         workflow.add_plot(fig5)
-
-        return workflow.build()
-
-        # Detect pulse TOAs
-        workflow.add_text("\n=== Staggered PRF Analysis ===")
-        windows_2d, window_length, valid_toas = extract_toa_windowed_2d(mf_output, toa_indices, min_prf_hz, max_prf_hz, sample_rate_hz)
-        workflow.add_text([
-            f"Min PRF: {min_prf_hz} Hz (period: {1000/min_prf_hz:.3f} ms)",
-            f"Max PRF: {max_prf_hz} Hz (period: {1000/max_prf_hz:.3f} ms)",
-            f"Window length: {window_length} samples ({window_length/sample_rate_hz*1000:.3f} ms)",
-            f"Number of pulses: {windows_2d.shape[0]}",
-        ])
-
-        # Create 2D heatmap
-        windows_2d_db = 10 * np.log10(np.abs(windows_2d) ** 2 + 1e-12)
-        
-        # Downsample for rendering
-        heatmap_data, skip_x, skip_y = downsample_heatmap(windows_2d_db, max_width=2000, max_height=1000)
-        workflow.add_text(f"Heatmap shape: {windows_2d_db.shape} → {heatmap_data.shape} (downsampled {skip_x}x{skip_y})")
-        
-        # Time axes for heatmap (adjusted for downsampling)
-        fast_time_us = np.arange(heatmap_data.shape[1]) * skip_x / sample_rate_hz * 1e6  # microseconds
-        pulse_numbers = np.arange(heatmap_data.shape[0]) * skip_y  # pulse index
-        
-        fig2 = go.Figure(data=go.Heatmap(
-            z=heatmap_data,
-            x=fast_time_us,
-            y=pulse_numbers,
-            colorscale='HSV',
-            colorbar=dict(title='Power (dB)'),
-        ))
-        fig2.update_layout(
-            title=f"Staggered PRF Heatmap ({min_prf_hz}-{max_prf_hz} Hz)",
-            xaxis_title="Fast Time (μs)",
-            yaxis_title="Pulse Number",
-            template='plotly_dark',
-            height=700
-        )
-        workflow.add_plot(fig2)
-
-        # Compute Pulse Pair Correlation (PPC)
-        workflow.add_text("\n=== Pulse Pair Correlation ===")
-        correlations, peak_positions, peak_values = compute_ppc_correlations(windows_2d)
-        
-        workflow.add_text([
-            f"Number of correlation pairs: {correlations.shape[0]}",
-            f"Correlation length: {correlations.shape[1]} samples",
-        ])
-        
-        # Create heatmap of correlations
-        correlations_db = 10 * np.log10(correlations + 1e-12)
-        
-        # Downsample correlations for rendering
-        corr_downsampled, skip_x_corr, skip_y_corr = downsample_heatmap(correlations_db, max_width=2000, max_height=1000)
-        workflow.add_text(f"Correlation heatmap: {correlations_db.shape} → {corr_downsampled.shape} (downsampled {skip_x_corr}x{skip_y_corr})")
-        
-        # Time axes for correlation heatmap
-        corr_lag_us = np.arange(corr_downsampled.shape[1]) * skip_x_corr / sample_rate_hz * 1e6
-        corr_pulse_pairs = np.arange(corr_downsampled.shape[0]) * skip_y_corr
-        
-        fig3 = go.Figure(data=go.Heatmap(
-            z=corr_downsampled,
-            x=corr_lag_us,
-            y=corr_pulse_pairs,
-            colorscale='HSV',
-            colorbar=dict(title='Correlation (dB)'),
-        ))
-        fig3.update_layout(
-            title="PPC Correlation Heatmap",
-            xaxis_title="Lag (μs)",
-            yaxis_title="Pulse Pair Number",
-            template='plotly_dark',
-            height=700
-        )
-        workflow.add_plot(fig3)
-
-        # Compute actual time between consecutive pulses (measured PRIs)
-        measured_pri_samples = np.diff(valid_toas)
-        measured_pri_us = measured_pri_samples / sample_rate_hz * 1e6
-        pulse_pair_numbers = np.arange(len(measured_pri_us))
-        
-        fig4 = go.Figure()
-        fig4.add_trace(go.Scatter(
-            x=pulse_pair_numbers,
-            y=measured_pri_us,
-            mode='markers',
-            name='Measured PRI',
-            marker=dict(
-                color='magenta',
-                size=3,
-            )
-        ))
-        fig4.update_layout(
-            title="Measured Pulse Repetition Intervals (PRI)",
-            xaxis_title="Pulse Pair Number",
-            yaxis_title="PRI (μs)",
-            template='plotly_dark',
-            height=600
-        )
-        workflow.add_plot(fig4)
 
         return workflow.build()
 
