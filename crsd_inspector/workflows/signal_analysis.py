@@ -31,7 +31,8 @@ PARAMS = {
         'default': -1,
         'min': -1,
         'max': 100000,
-        'help': 'Number of pulses to extract and stack for analysis (-1 = use all available)'
+        'step': 1,
+        'help': 'Number of pulses to extract and stack for analysis (-1 for all pulses)'
     },
     'downsample_range_factor': {
         'type': 'number',
@@ -39,6 +40,7 @@ PARAMS = {
         'default': 1,
         'min': 1,
         'max': 100,
+        'step': 1,
         'help': 'Downsample range dimension by this factor (1=no downsampling, 10=every 10th sample)'
     }
 }
