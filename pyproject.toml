@@ -50,7 +50,8 @@ generator = [
 ]
 
 [project.scripts]
-crsd-inspector = "crsd_inspector.app:main"
+crsd-inspector = "crsd_inspector.cli:main"
+crsd-inspector-gui = "crsd_inspector.app:main"
 crsd-generate = "crsd_generator.cli:cli"
 
 [project.urls]
