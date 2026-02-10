@@ -46,3 +46,6 @@ pulse_extraction_output/
 
 # Streamlit
 .streamlit/
+
+# Large CRSD data files
+*.crsd

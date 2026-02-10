@@ -1,19 +1,20 @@
 """
-Pulse Extraction Viewer for example_4.crsd
+Pulse Extraction Viewer for CRSD files
 Generates static HTML dashboard
 """
 
+import sys
 import numpy as np
 import sarkit.crsd as crsd
 from crsd_inspector.workflows import pulse_extraction
 import staticdash
 
-def load_and_run():
-    """Load example_4.crsd and run pulse extraction workflow"""
+def load_and_run(filename='examples/example_5.crsd'):
+    """Load CRSD file and run pulse extraction workflow"""
     
     # Load CRSD file
-    print("Loading example_4.crsd...")
-    with open('examples/example_4.crsd', 'rb') as f:
+    print(f"Loading {filename}...")
+    with open(filename, 'rb') as f:
         reader = crsd.Reader(f)
         root = reader.metadata.xmltree.getroot()
         
@@ -47,15 +48,32 @@ def load_and_run():
                     sample_rate_hz = float(sample_rate.text)
         except:
             pass
+        
+        # Extract file header KVPs for ground truth
+        file_header_kvps = {}
+        if hasattr(reader.metadata, 'file_header_part') and hasattr(reader.metadata.file_header_part, 'additional_kvps'):
+            file_header_kvps = reader.metadata.file_header_part.additional_kvps
+        
+        # Try to extract PRF bounds from PPP data
+        min_prf_hz = 800.0  # Default
+        max_prf_hz = 1200.0  # Default
+        try:
+            ppp = reader.read_ppps('TX1')
+            if ppp is not None and len(ppp) > 1 and 'TxTime' in ppp.dtype.names:
+                pulse_times = ppp['TxTime']
+                pris = np.diff(pulse_times)
+                prfs = 1.0 / pris
+                # Use actual PRF range with some margin
+                min_prf_hz = float(prfs.min() * 0.9)  # 10% margin
+                max_prf_hz = float(prfs.max() * 1.1)  # 10% margin
+                print(f"Detected PRF range: {min_prf_hz:.1f} - {max_prf_hz:.1f} Hz")
+        except Exception as e:
+            print(f"Could not extract PRF from PPP: {e}")
+            print(f"Using default PRF range: {min_prf_hz:.1f} - {max_prf_hz:.1f} Hz")
     
     print(f"Signal shape: {signal_data.shape}")
     print(f"Sample rate: {sample_rate_hz/1e6:.1f} MHz")
     print(f"TX waveform length: {len(tx_wfm)} samples")
-    
-    # Extract file header KVPs for ground truth
-    file_header_kvps = {}
-    if hasattr(reader.metadata, 'file_header_part') and hasattr(reader.metadata.file_header_part, 'additional_kvps'):
-        file_header_kvps = reader.metadata.file_header_part.additional_kvps
     
     # Prepare metadata
     metadata = {
@@ -63,6 +81,8 @@ def load_and_run():
         'tx_wfm': tx_wfm,
         'window_type': 'hamming',
         'file_header_kvps': file_header_kvps,
+        'min_prf_hz': min_prf_hz,
+        'max_prf_hz': max_prf_hz,
     }
     
     # Run workflow
@@ -73,12 +93,19 @@ def load_and_run():
 
 
 if __name__ == '__main__':
+    # Get filename from command line or use default
+    filename = sys.argv[1] if len(sys.argv) > 1 else 'examples/example_5.crsd'
+    
     # Run the workflow
-    workflow = load_and_run()
+    workflow = load_and_run(filename)
+    
+    # Extract filename for title
+    import os
+    basename = os.path.basename(filename)
     
     # Create staticdash Dashboard
     print("\nGenerating static HTML dashboard...")
-    dashboard = staticdash.Dashboard("Pulse Extraction - example_4.crsd")
+    dashboard = staticdash.Dashboard(f"Pulse Extraction - {basename}")
     page = staticdash.Page(slug="results", title="Results")
     
     # Add workflow results to page

@@ -362,21 +362,27 @@ class CRSDGenerator:
         # Prepare support array (TX waveform)
         tx_sa = tx_wfm[None, :].astype(np.complex64)
         
+        # Get ground truth KVPs (allow subclasses to customize)
+        if hasattr(self, '_get_ground_truth_kvps'):
+            kvps = self._get_ground_truth_kvps()
+        else:
+            kvps = {
+                "CREATOR": "crsd-inspector",
+                "NUM_CHANNELS": str(num_channels),
+                "NUM_TARGETS": str(len(self.config.targets)),
+                "SNR_DB": f"{self.config.snr_db:.2f}",
+                "SAMPLE_RATE_HZ": f"{self.config.sample_rate_hz:.0f}",
+                "PRF_HZ": f"{self.config.prf_hz:.1f}",
+                "BANDWIDTH_HZ": f"{self.config.bandwidth_hz:.0f}",
+                "STAGGER_PATTERN": self.config.stagger_pattern.value,
+                "NUM_PULSES": str(num_pulses),
+            }
+        
         # Create metadata object
         metadata = skcrsd.Metadata(
             xmltree=xmltree,
             file_header_part=skcrsd.FileHeaderPart(
-                additional_kvps={
-                    "CREATOR": "crsd-inspector",
-                    "NUM_CHANNELS": str(num_channels),
-                    "NUM_TARGETS": str(len(self.config.targets)),
-                    "SNR_DB": f"{self.config.snr_db:.2f}",
-                    "SAMPLE_RATE_HZ": f"{self.config.sample_rate_hz:.0f}",
-                    "PRF_HZ": f"{self.config.prf_hz:.1f}",
-                    "BANDWIDTH_HZ": f"{self.config.bandwidth_hz:.0f}",
-                    "STAGGER_PATTERN": self.config.stagger_pattern.value,
-                    "NUM_PULSES": str(num_pulses),
-                }
+                additional_kvps=kvps
             ),
         )
         

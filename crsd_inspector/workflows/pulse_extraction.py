@@ -254,7 +254,7 @@ def run_workflow(signal_data, metadata=None, **kwargs):
             f"Number of Targets: {num_targets}",
         ])
         
-        # For 2-step stagger with 15% variation
+        # Display PRF pattern details
         if stagger_pattern == "2-step":
             stagger_ratio = 0.15  # Default from generator code
             # Check if we can read the actual stagger ratio from metadata
@@ -270,6 +270,15 @@ def run_workflow(signal_data, metadata=None, **kwargs):
                 f"True PRI range: {pri_low*1e6:.1f} - {pri_high*1e6:.1f} μs",
                 f"  High PRF ({prf_high:.1f} Hz) = Short PRI ({pri_low*1e6:.1f} μs)",
                 f"  Low PRF ({prf_low:.1f} Hz) = Long PRI ({pri_high*1e6:.1f} μs)",
+            ])
+        elif stagger_pattern == "none":
+            # PRF walk pattern (custom)
+            workflow.add_text([
+                f"PRF Walk Pattern:",
+                f"  3 pulses @ 1000 Hz (PRI = 1000 μs)",
+                f"  3 pulses @ 1100 Hz (PRI = 909 μs)",
+                f"  3 pulses @ 1200 Hz (PRI = 833 μs)",
+                f"  ...repeating 9-pulse cycle",
             ])
         
         # Target truth - handle both example_2 (5 targets) and example_4 (2 targets)
