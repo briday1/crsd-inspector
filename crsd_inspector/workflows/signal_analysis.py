@@ -32,6 +32,14 @@ PARAMS = {
         'min': 10,
         'max': 10000,
         'help': 'Number of pulses to extract and stack for analysis'
+    },
+    'downsample_range_factor': {
+        'type': 'number',
+        'label': 'Range Downsample Factor',
+        'default': 1,
+        'min': 1,
+        'max': 100,
+        'help': 'Downsample range dimension by this factor (1=no downsampling, 10=every 10th sample)'
     }
 }
 
@@ -269,15 +277,17 @@ def _format_results(context, metadata):
     sample_rate_hz = context.get('sample_rate_hz', metadata.get('sample_rate_hz', 100e6))
     actual_num_pulses = context.get('actual_num_pulses', 0)
     pri_samples = context.get('pri_samples', 0)
+    downsample_factor = int(metadata.get('downsample_range_factor', 1))
     
     # Parameters table
     params_table = {
-        "Parameter": ["PRF", "Sample Rate", "PRI (samples)", "Pulses Extracted"],
+        "Parameter": ["PRF", "Sample Rate", "PRI (samples)", "Pulses Extracted", "Range Downsample"],
         "Value": [
             f"{prf_hz:.1f} Hz",
             f"{sample_rate_hz/1e6:.1f} MHz",
             f"{pri_samples}",
-            f"{actual_num_pulses}"
+            f"{actual_num_pulses}",
+            f"{downsample_factor}x"
         ]
     }
     workflow.add_table("Analysis Parameters", params_table)
@@ -285,7 +295,13 @@ def _format_results(context, metadata):
     # Amplitude heatmap
     amplitude = context.get('amplitude')
     if amplitude is not None:
-        amp_db = 20 * np.log10(amplitude + 1e-10)
+        # Downsample in range dimension if requested
+        if downsample_factor > 1:
+            amplitude_plot = amplitude[:, ::downsample_factor]
+        else:
+            amplitude_plot = amplitude
+        
+        amp_db = 20 * np.log10(amplitude_plot + 1e-10)
         
         amp_min_default = float(np.percentile(amp_db, 1))
         amp_max_default = float(np.percentile(amp_db, 99))
@@ -330,11 +346,17 @@ def _format_results(context, metadata):
     # Phase heatmap
     phase = context.get('phase')
     if phase is not None:
-        phase_min_default = float(np.percentile(phase, 1))
-        phase_max_default = float(np.percentile(phase, 99))
+        # Downsample in range dimension if requested
+        if downsample_factor > 1:
+            phase_plot = phase[:, ::downsample_factor]
+        else:
+            phase_plot = phase
+        
+        phase_min_default = float(np.percentile(phase_plot, 1))
+        phase_max_default = float(np.percentile(phase_plot, 99))
         
         fig = go.Figure(data=go.Heatmap(
-            z=phase,
+            z=phase_plot,
             colorscale='HSV',
             zmin=phase_min_default,
             zmax=phase_max_default,
