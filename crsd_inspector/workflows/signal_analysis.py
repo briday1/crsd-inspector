@@ -300,6 +300,40 @@ def _format_results(context, metadata):
     }
     workflow.add_table("Analysis Parameters", params_table)
     
+    # Power Spectral Density
+    pulses = context.get('pulses')
+    if pulses is not None:
+        # Compute PSD along fast-time (range frequency domain)
+        # Average over pulses for visualization
+        num_pulses, num_range = pulses.shape
+        
+        # Compute FFT along fast-time dimension (range)
+        fft_data = np.fft.fftshift(np.fft.fft(pulses, axis=1), axes=1)
+        psd = np.mean(np.abs(fft_data)**2, axis=0)  # Average over pulses
+        psd_db = 10 * np.log10(psd + 1e-10)
+        
+        # Frequency axis (range frequency bins)
+        range_freqs = np.fft.fftshift(np.fft.fftfreq(num_range, d=1/sample_rate_hz))
+        
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(
+            x=range_freqs / 1e6,  # Convert to MHz
+            y=psd_db,
+            mode='lines',
+            line=dict(color='cyan', width=2),
+            name='PSD'
+        ))
+        
+        fig.update_layout(
+            title="Power Spectral Density (Fast-Time Frequency Domain)",
+            xaxis_title="Frequency (MHz)",
+            yaxis_title="Power (dB)",
+            height=400,
+            template='plotly_dark',
+            showlegend=False
+        )
+        workflow.add_plot(fig)
+    
     # Amplitude heatmap
     amplitude = context.get('amplitude')
     if amplitude is not None:
@@ -449,37 +483,4 @@ def _format_results(context, metadata):
     iq_stats = context.get('iq_stats')
     if iq_stats:
         workflow.add_table("I/Q Statistics", iq_stats)
-    
-    # Power Spectral Density
-    pulses = context.get('pulses')
-    if pulses is not None:
-        # Compute PSD along fast-time (range frequency domain)
-        # Average over pulses for visualization
-        num_pulses, num_range = pulses.shape
-        
-        # Compute FFT along fast-time dimension (range)
-        fft_data = np.fft.fftshift(np.fft.fft(pulses, axis=1), axes=1)
-        psd = np.mean(np.abs(fft_data)**2, axis=0)  # Average over pulses
-        psd_db = 10 * np.log10(psd + 1e-10)
-        
-        # Frequency axis (range frequency bins)
-        range_freqs = np.fft.fftshift(np.fft.fftfreq(num_range, d=1/sample_rate_hz))
-        
-        fig = go.Figure()
-        fig.add_trace(go.Scatter(
-            x=range_freqs / 1e6,  # Convert to MHz
-            y=psd_db,
-            mode='lines',
-            line=dict(color='cyan', width=2),
-            name='PSD'
-        ))
-        
-        fig.update_layout(
-            title="Power Spectral Density (Fast-Time Frequency Domain)",
-            xaxis_title="Frequency (MHz)",
-            yaxis_title="Power (dB)",
-            height=400,
-            template='plotly_dark',
-            showlegend=False
-        )
-        workflow.add_plot(fig)
+
