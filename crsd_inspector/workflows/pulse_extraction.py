@@ -829,17 +829,17 @@ def run_workflow(signal_data, metadata=None, **kwargs):
         slow_time_window = np.kaiser(num_pulses, beta=8.6)  # beta=8.6 gives ~-60dB sidelobes
         
         # Compute Doppler parameters
-        num_doppler_bins = num_pulses
         avg_pri_s = np.mean(pris_us) / 1e6 if num_pulses > 1 else 1.0
-        doppler_resolution_hz = 1.0 / t_span if t_span > 0 else 1.0
-        
-        # For non-uniform sampling, the unambiguous Doppler range is approximately
-        # determined by the average PRF, but with stagger we get spectral artifacts
         avg_prf = 1.0 / avg_pri_s
         nyquist_doppler = avg_prf / 2.0
         
-        # The output frequency grid
-        doppler_freqs_hz = np.fft.fftfreq(num_doppler_bins, t_span / num_doppler_bins)
+        # For NUFFT, the frequency resolution is 1/t_span (reciprocal of total observation time)
+        # The frequency grid should span the unambiguous Doppler range
+        doppler_resolution_hz = 1.0 / t_span if t_span > 0 else 1.0
+        num_doppler_bins = num_pulses
+        
+        # Create frequency grid centered at zero, spanning +/- Nyquist
+        doppler_freqs_hz = np.linspace(-nyquist_doppler, nyquist_doppler, num_doppler_bins)
         
         # Use more range bins - up to 10000 or available
         max_range_bins = min(10000, extraction_window_samples)
@@ -858,11 +858,7 @@ def run_workflow(signal_data, metadata=None, **kwargs):
             for k, freq in enumerate(doppler_freqs_hz):
                 range_doppler[k, range_bin] = np.sum(signal * np.exp(-2j * np.pi * freq * pulse_times_relative_s))
         
-        # Shift zero frequency to center
-        range_doppler = np.fft.fftshift(range_doppler, axes=0)
-        doppler_freqs_hz = np.fft.fftshift(doppler_freqs_hz)
-        
-        # Convert to dB
+        # Convert to dB (no fftshift needed, frequency grid already centered)
         range_doppler_db = 10 * np.log10(np.abs(range_doppler) ** 2 + 1e-12)
         
         # Downsample for rendering
