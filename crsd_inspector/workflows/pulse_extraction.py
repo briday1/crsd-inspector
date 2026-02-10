@@ -14,8 +14,8 @@ from dagex import Graph
 
 # Create workflow instance
 workflow = Workflow(
-    name="Pulse Extraction",
-    description="Matched filter processing for continuous radar data with pulse extraction"
+    name="Signal Processing",
+    description="Full processing pipeline: pulse extraction through Doppler compression"
 )
 
 # Workflow parameters
@@ -66,6 +66,26 @@ PARAMS = {
         'label': 'Fixed PRFs (Hz, comma-separated)',
         'type': 'text',
         'default': '1000,1200,1500',
+    },
+    'tx_crsd_file': {
+        'label': 'TX CRSD File (optional)',
+        'type': 'text',
+        'default': '',
+        'help': 'Path to transmit waveform CRSD file (will extract TX waveform and PRF if provided)'
+    },
+    'use_lowpass_filter': {
+        'label': 'Use Lowpass Filter (if no TX waveform)',
+        'type': 'checkbox',
+        'default': False,
+        'help': 'Apply lowpass filter instead of matched filter when TX waveform unavailable'
+    },
+    'lowpass_bandwidth_mhz': {
+        'label': 'Lowpass Bandwidth (MHz)',
+        'type': 'number',
+        'default': 10.0,
+        'min': 0.1,
+        'max': 100.0,
+        'help': 'Cutoff frequency for lowpass filter'
     },
     'nufft_kernel': {
         'label': 'NUFFT Kernel',
