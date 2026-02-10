@@ -12,8 +12,6 @@ import importlib.util
 from datetime import datetime
 from pathlib import Path
 import glob
-import tkinter as tk
-from tkinter import filedialog
 
 try:
     import dagex
@@ -238,28 +236,43 @@ if not st.session_state.auto_scanned:
     st.session_state.auto_scanned = True
 
 # Directory input with browse and scan buttons
-col1, col2 = st.sidebar.columns([3, 1])
-with col1:
-    directory_path = st.text_input(
-        "Directory Path",
-        value="./examples",
-        help="Enter path to directory containing CRSD files",
-        key="directory_path_input",
-        label_visibility="collapsed"
-    )
-with col2:
-    if st.button("📁", help="Browse for directory", use_container_width=True, key="browse_dir_btn"):
-        # Create a hidden tkinter root window
-        root = tk.Tk()
-        root.withdraw()
-        root.wm_attributes('-topmost', 1)
-        selected_dir = filedialog.askdirectory(master=root, initialdir=directory_path)
-        root.destroy()
-        if selected_dir:
-            st.session_state.directory_path_input = selected_dir
-            st.rerun()
+directory_path = st.sidebar.text_input(
+    "Directory Path",
+    value="./examples",
+    help="Enter path to directory containing CRSD files",
+    key="directory_path_input"
+)
 
-st.sidebar.write("Directory Path")  # Label above the inputs
+# Add simple directory browser
+if st.sidebar.checkbox("Browse directories", key="show_dir_browser"):
+    current_browse = st.session_state.get("browse_path", os.path.expanduser("~"))
+    try:
+        items = sorted([d for d in os.listdir(current_browse) if os.path.isdir(os.path.join(current_browse, d)) and not d.startswith('.')])
+        parent_dir = os.path.dirname(current_browse)
+        
+        st.sidebar.markdown(f"**Current:** `{current_browse}`")
+        
+        col1, col2 = st.sidebar.columns([1, 1])
+        with col1:
+            if st.button("⬆️ Parent", use_container_width=True, key="parent_dir"):
+                st.session_state.browse_path = parent_dir
+                st.rerun()
+        with col2:
+            if st.button("✓ Select", use_container_width=True, key="select_dir"):
+                st.session_state.directory_path_input = current_browse
+                st.rerun()
+        
+        if items:
+            selected = st.sidebar.selectbox("Folders:", [""] + items, key="folder_select")
+            if selected:
+                new_path = os.path.join(current_browse, selected)
+                if st.sidebar.button("Open →", use_container_width=True, key="open_folder"):
+                    st.session_state.browse_path = new_path
+                    st.rerun()
+    except PermissionError:
+        st.sidebar.error("Permission denied")
+    except Exception as e:
+        st.sidebar.error(f"Error: {e}")
 
 if st.sidebar.button("Scan Directory", use_container_width=True):
     if os.path.isdir(directory_path):
@@ -400,31 +413,52 @@ if st.session_state.selected_workflow:
                 is_file_param = any(keyword in param_key.lower() for keyword in ['file', 'path', 'crsd'])
                 
                 if is_file_param:
-                    # Render with file browser button
-                    col1, col2 = st.sidebar.columns([3, 1])
-                    with col1:
-                        value = st.text_input(
-                            label,
-                            value=str(default) if default is not None else '',
-                            key=f"param_{param_key}",
-                            label_visibility="visible"
-                        )
-                    with col2:
-                        st.write("")  # Spacing to align with input
-                        if st.button("📁", help="Browse for file", use_container_width=True, key=f"browse_{param_key}"):
-                            # Create a hidden tkinter root window
-                            root = tk.Tk()
-                            root.withdraw()
-                            root.wm_attributes('-topmost', 1)
-                            selected_file = filedialog.askopenfilename(
-                                master=root,
-                                initialdir=os.path.dirname(value) if value and os.path.exists(os.path.dirname(value)) else ".",
-                                filetypes=[("CRSD Files", "*.crsd"), ("All Files", "*.*")]
-                            )
-                            root.destroy()
-                            if selected_file:
-                                st.session_state[f"param_{param_key}"] = selected_file
-                                st.rerun()
+                    # Render with file browser
+                    value = st.sidebar.text_input(
+                        label,
+                        value=str(default) if default is not None else '',
+                        key=f"param_{param_key}",
+                        help="Enter file path or use browser below"
+                    )
+                    
+                    # Add file browser checkbox
+                    if st.sidebar.checkbox(f"Browse for {label}", key=f"browse_{param_key}_check"):
+                        browse_path = st.session_state.get(f"file_browse_path_{param_key}", os.path.expanduser("~"))
+                        try:
+                            # List directories and files
+                            all_items = sorted(os.listdir(browse_path))
+                            dirs = [d for d in all_items if os.path.isdir(os.path.join(browse_path, d)) and not d.startswith('.')]
+                            files = [f for f in all_items if os.path.isfile(os.path.join(browse_path, f)) and not f.startswith('.')]
+                            
+                            if 'crsd' in param_key.lower():
+                                files = [f for f in files if f.endswith('.crsd')]
+                            
+                            parent_dir = os.path.dirname(browse_path)
+                            
+                            st.sidebar.markdown(f"**Path:** `{browse_path}`")
+                            
+                            col1, col2 = st.sidebar.columns([1, 1])
+                            with col1:
+                                if st.button("⬆️ Parent", use_container_width=True, key=f"parent_{param_key}"):
+                                    st.session_state[f"file_browse_path_{param_key}"] = parent_dir
+                                    st.rerun()
+                            
+                            if dirs:
+                                selected_dir = st.sidebar.selectbox("Folders:", [""] + dirs, key=f"dir_select_{param_key}")
+                                if selected_dir and st.sidebar.button("Open →", use_container_width=True, key=f"open_{param_key}"):
+                                    st.session_state[f"file_browse_path_{param_key}"] = os.path.join(browse_path, selected_dir)
+                                    st.rerun()
+                            
+                            if files:
+                                selected_file = st.sidebar.selectbox("Files:", [""] + files, key=f"file_select_{param_key}")
+                                if selected_file and st.sidebar.button("✓ Select File", use_container_width=True, key=f"select_file_{param_key}"):
+                                    full_path = os.path.join(browse_path, selected_file)
+                                    st.session_state[f"param_{param_key}"] = full_path
+                                    st.rerun()
+                        except PermissionError:
+                            st.sidebar.error("Permission denied")
+                        except Exception as e:
+                            st.sidebar.error(f"Error: {e}")
                 else:
                     # Regular text input
                     value = st.sidebar.text_input(
