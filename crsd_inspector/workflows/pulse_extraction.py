@@ -270,7 +270,10 @@ def run_workflow(signal_data, metadata=None, **kwargs):
             ["Targets", str(num_targets)],
         ])
     
-    workflow.add_table(["Parameter", "Value"], summary_rows)
+    workflow.add_table("Processing Parameters", {
+        "Parameter": [row[0] for row in summary_rows],
+        "Value": [row[1] for row in summary_rows]
+    })
 
     try:
         if tx_wfm is None:
