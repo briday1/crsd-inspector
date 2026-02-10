@@ -39,6 +39,10 @@ if 'selected_workflow' not in st.session_state:
     st.session_state.selected_workflow = None
 if 'workflows' not in st.session_state:
     st.session_state.workflows = {}
+if 'selected_channel' not in st.session_state:
+    st.session_state.selected_channel = None
+if 'auto_scanned' not in st.session_state:
+    st.session_state.auto_scanned = False
 
 st.title("CRSD Inspector")
 st.markdown("""
@@ -219,60 +223,76 @@ def load_and_process_file(file_path):
 
 
 # Sidebar for directory/file selection
-st.sidebar.header("File Selection")
+st.sidebar.header("CRSD Inspector")
 
-# File source selection
-file_source = st.sidebar.radio(
-    "Source",
-    ["Browse Directory", "Upload Files"],
-    index=0
+# Auto-scan directory on first load
+if not st.session_state.auto_scanned:
+    directory_path = "./examples"
+    if os.path.isdir(directory_path):
+        files = scan_directory_for_crsd(directory_path)
+        if files:
+            st.session_state.crsd_files = files
+            st.session_state.current_file_index = 0
+    st.session_state.auto_scanned = True
+
+# Directory input with scan button
+directory_path = st.sidebar.text_input(
+    "Directory Path",
+    value="./examples",
+    help="Enter path to directory containing CRSD files"
 )
 
-if file_source == "Browse Directory":
-    directory_path = st.sidebar.text_input(
-        "Directory Path",
-        value="./examples",
-        help="Enter path to directory containing CRSD files"
-    )
-    
-    if st.sidebar.button("Scan Directory"):
-        if os.path.isdir(directory_path):
-            files = scan_directory_for_crsd(directory_path)
-            if files:
-                st.session_state.crsd_files = files
-                st.session_state.current_file_index = 0
-                st.session_state.file_cache = {}  # Clear cache
-                st.sidebar.success(f"Found {len(files)} CRSD file(s)")
-            else:
-                st.sidebar.warning("No CRSD files found in directory")
+if st.sidebar.button("Scan Directory", use_container_width=True):
+    if os.path.isdir(directory_path):
+        files = scan_directory_for_crsd(directory_path)
+        if files:
+            st.session_state.crsd_files = files
+            st.session_state.current_file_index = 0
+            st.session_state.file_cache = {}  # Clear cache
+            st.sidebar.success(f"Found {len(files)} CRSD file(s)")
         else:
-            st.sidebar.error("Invalid directory path")
+            st.sidebar.warning("No CRSD files found in directory")
+    else:
+        st.sidebar.error("Invalid directory path")
 
-elif file_source == "Upload Files":
-    uploaded_files = st.sidebar.file_uploader(
-        "Choose CRSD files",
-        type=['crsd', 'nitf', 'ntf'],
-        accept_multiple_files=True
+# Initialize current_data
+current_data = None
+
+# File selection dropdown
+if st.session_state.crsd_files:
+    st.sidebar.markdown("---")
+    file_options = [os.path.basename(f) for f in st.session_state.crsd_files]
+    current_selection = st.sidebar.selectbox(
+        "CRSD File",
+        options=range(len(file_options)),
+        index=st.session_state.current_file_index,
+        format_func=lambda x: file_options[x]
     )
     
-    if uploaded_files:
-        # Save uploaded files temporarily
-        temp_dir = tempfile.mkdtemp()
-        file_paths = []
-        for uploaded_file in uploaded_files:
-            temp_path = os.path.join(temp_dir, uploaded_file.name)
-            with open(temp_path, 'wb') as f:
-                f.write(uploaded_file.read())
-            file_paths.append(temp_path)
-        
-        st.session_state.crsd_files = file_paths
-        st.session_state.current_file_index = 0
-        st.session_state.file_cache = {}
-        st.sidebar.success(f"Uploaded {len(file_paths)} file(s)")
+    if current_selection != st.session_state.current_file_index:
+        st.session_state.current_file_index = current_selection
+        st.session_state.file_cache = {}  # Clear cache when changing files
+        st.rerun()
+    
+    # Load current file to get channel info
+    current_file = st.session_state.crsd_files[st.session_state.current_file_index]
+    current_data = load_and_process_file(current_file)
+    
+    if current_data:
+        # Channel selection
+        channel_ids = current_data['metadata'].get('channel_ids', [])
+        if channel_ids:
+            selected_channel = st.sidebar.selectbox(
+                "Channel",
+                options=channel_ids,
+                index=0 if st.session_state.selected_channel not in channel_ids else channel_ids.index(st.session_state.selected_channel)
+            )
+            st.session_state.selected_channel = selected_channel
+        else:
+            st.session_state.selected_channel = None
 
 # Workflow selection
 st.sidebar.markdown("---")
-st.sidebar.subheader("Workflow Selection")
 
 # Discover workflows if not already done
 if not st.session_state.workflows:
@@ -281,10 +301,10 @@ if not st.session_state.workflows:
 if st.session_state.workflows:
     workflow_names = ["None (Default View)"] + list(st.session_state.workflows.keys())
     selected_workflow_name = st.sidebar.selectbox(
-        "Select Workflow",
+        "Workflow",
         workflow_names,
         index=0,
-        help="Choose a processing workflow to apply to the selected CRSD file"
+        help="Choose a processing workflow"
     )
     
     if selected_workflow_name != "None (Default View)":
@@ -295,130 +315,159 @@ if st.session_state.workflows:
     else:
         st.session_state.selected_workflow = None
 else:
-    st.sidebar.info("No workflows found in workflows/ directory")
+    st.sidebar.info("No workflows found")
 
-# File list and selection
-if st.session_state.crsd_files:
+# Workflow parameters (if workflow selected)
+if st.session_state.selected_workflow:
+    workflow_module = st.session_state.selected_workflow['module']
+    
+    if hasattr(workflow_module, 'PARAMS'):
+        st.sidebar.markdown("---")
+        st.sidebar.subheader("Parameters")
+        
+        # Initialize session state for workflow params if not exists
+        if 'workflow_params' not in st.session_state:
+            st.session_state.workflow_params = {}
+        
+        for param_key, param_config in workflow_module.PARAMS.items():
+            label = param_config.get('label', param_key)
+            param_type = param_config.get('type', 'text')
+            default = param_config.get('default')
+            
+            if param_type == 'dropdown':
+                options = [opt['value'] for opt in param_config.get('options', [])]
+                labels_map = {opt['value']: opt['label'] for opt in param_config.get('options', [])}
+                
+                # Find default index
+                try:
+                    default_idx = options.index(default) if default in options else 0
+                except ValueError:
+                    default_idx = 0
+                
+                selected = st.sidebar.selectbox(
+                    label,
+                    options=options,
+                    index=default_idx,
+                    format_func=lambda x: labels_map.get(x, x),
+                    key=f"param_{param_key}"
+                )
+                st.session_state.workflow_params[param_key] = selected
+                
+            elif param_type == 'number':
+                min_val = param_config.get('min')
+                max_val = param_config.get('max')
+                step = param_config.get('step')
+                
+                value = st.sidebar.number_input(
+                    label,
+                    value=float(default) if default is not None else 0.0,
+                    min_value=float(min_val) if min_val is not None else None,
+                    max_value=float(max_val) if max_val is not None else None,
+                    step=float(step) if step is not None else None,
+                    key=f"param_{param_key}"
+                )
+                st.session_state.workflow_params[param_key] = value
+                
+            elif param_type == 'checkbox':
+                value = st.sidebar.checkbox(
+                    label,
+                    value=bool(default) if default is not None else False,
+                    key=f"param_{param_key}"
+                )
+                st.session_state.workflow_params[param_key] = value
+                
+            elif param_type == 'text':
+                value = st.sidebar.text_input(
+                    label,
+                    value=str(default) if default is not None else '',
+                    key=f"param_{param_key}"
+                )
+                st.session_state.workflow_params[param_key] = value
+    
+    # Execute button at the end of sidebar
     st.sidebar.markdown("---")
-    st.sidebar.subheader(f"Files ({len(st.session_state.crsd_files)})")
-    
-    # Navigation buttons
-    col1, col2, col3 = st.sidebar.columns(3)
-    
-    with col1:
-        if st.button("◀", key="prev_btn", use_container_width=True):
-            if st.session_state.current_file_index > 0:
-                st.session_state.current_file_index -= 1
-                st.rerun()
-    
-    with col2:
-        if st.button("↻", key="refresh_btn", use_container_width=True):
-            st.session_state.file_cache = {}
-            st.rerun()
-    
-    with col3:
-        if st.button("▶", key="next_btn", use_container_width=True):
-            if st.session_state.current_file_index < len(st.session_state.crsd_files) - 1:
-                st.session_state.current_file_index += 1
-                st.rerun()
-    
-    # File selector - using selectbox for better scalability
-    file_options = [os.path.basename(f) for f in st.session_state.crsd_files]
-    current_selection = st.sidebar.selectbox(
-        "Select file:",
-        options=range(len(file_options)),
-        index=st.session_state.current_file_index,
-        format_func=lambda x: file_options[x]
+    execute_button_disabled = not (st.session_state.selected_workflow and st.session_state.selected_channel)
+    execute_clicked = st.sidebar.button(
+        "Execute Workflow",
+        disabled=execute_button_disabled,
+        type="primary",
+        use_container_width=True
     )
     
-    if current_selection != st.session_state.current_file_index:
-        st.session_state.current_file_index = current_selection
-        st.rerun()
+    if execute_clicked and current_data:
+        with st.spinner(f"Executing workflow on channel {st.session_state.selected_channel}..."):
+            # Prepare metadata with workflow parameters
+            workflow_metadata = current_data['metadata'].copy()
+            
+            # Add workflow parameters from session state
+            if 'workflow_params' in st.session_state:
+                workflow_metadata.update(st.session_state.workflow_params)
+            
+            workflow_results = execute_workflow(
+                st.session_state.selected_workflow['module'],
+                current_data['channel_data'],
+                st.session_state.selected_channel,
+                current_data.get('tx_wfm'),
+                workflow_metadata
+            )
+            
+            # Store results in session state to persist across reruns
+            st.session_state.last_workflow_results = workflow_results
 
 # Main content
-if st.session_state.crsd_files:
-    current_file = st.session_state.crsd_files[st.session_state.current_file_index]
-    
-    # Load current file
-    with st.spinner(f"Loading {os.path.basename(current_file)}..."):
-        current_data = load_and_process_file(current_file)
-    
-    if current_data is None:
-        st.error("Failed to load file. Please check the file format.")
+if st.session_state.crsd_files and current_data:
+    # Display last executed results if available
+    if 'last_workflow_results' in st.session_state:
+        workflow_results = st.session_state.last_workflow_results
     else:
-        # Channel selection
-        channel_ids = current_data['metadata'].get('channel_ids', [])
-        if len(channel_ids) > 1:
-            selected_channel = st.selectbox("Select Channel", channel_ids, key="channel_selector")
-        else:
-            selected_channel = channel_ids[0] if channel_ids else None
-        
-        # Execute workflow if selected
         workflow_results = None
-        if st.session_state.selected_workflow and selected_channel:
-            with st.spinner(f"Executing workflow on channel {selected_channel}..."):
-                workflow_results = execute_workflow(
-                    st.session_state.selected_workflow['module'],
-                    current_data['channel_data'],
-                    selected_channel,
-                    current_data.get('tx_wfm'),
-                    current_data['metadata'].copy()
-                )
-        
-        # Display workflow results
-        if workflow_results:
-            # Check if new ordered format or legacy format
-            if "results" in workflow_results:
-                # New ordered format - display in order
-                for item in workflow_results["results"]:
-                    if item["type"] == "text":
-                        for text in item["content"]:
-                            st.markdown(text)
-                    elif item["type"] == "table":
-                        st.markdown(f"**{item['title']}**")
-                        # Convert dict to dataframe for better display
-                        if isinstance(item['data'], dict):
-                            df = pd.DataFrame(item['data'])
-                            st.dataframe(df, use_container_width=True, hide_index=True)
-                        else:
-                            st.dataframe(item['data'], use_container_width=True)
-                    elif item["type"] == "plot":
-                        st.plotly_chart(item["figure"], use_container_width=True)
-            else:
-                # Legacy format - display grouped by type (tables, plots, text)
-                if workflow_results.get("tables"):
-                    for table_data in workflow_results["tables"]:
-                        st.markdown(f"**{table_data['title']}**")
-                        # Convert dict to dataframe for better display
-                        if isinstance(table_data['data'], dict):
-                            df = pd.DataFrame(table_data['data'])
-                            st.dataframe(df, use_container_width=True, hide_index=True)
-                        else:
-                            st.dataframe(table_data['data'], use_container_width=True)
-                
-                # Display plots (figure objects from workflow)
-                if workflow_results.get("plots"):
-                    for fig in workflow_results["plots"]:
-                        st.plotly_chart(fig, use_container_width=True)
-                
-                # Display text
-                if workflow_results.get("text"):
-                    for text in workflow_results["text"]:
+    
+    # Display workflow results
+    if workflow_results:
+        # Check if new ordered format or legacy format
+        if "results" in workflow_results:
+            # New ordered format - display in order
+            for item in workflow_results["results"]:
+                if item["type"] == "text":
+                    for text in item["content"]:
                         st.markdown(text)
+                elif item["type"] == "table":
+                    st.markdown(f"**{item['title']}**")
+                    # Convert dict to dataframe for better display
+                    if isinstance(item['data'], dict):
+                        df = pd.DataFrame(item['data'])
+                        st.dataframe(df, use_container_width=True, hide_index=True)
+                    else:
+                        st.dataframe(item['data'], use_container_width=True)
+                elif item["type"] == "plot":
+                    st.plotly_chart(item["figure"], use_container_width=True)
         else:
-            st.info("Select a workflow from the sidebar to analyze this file")
-
+            # Legacy format - display grouped by type (tables, plots, text)
+            if workflow_results.get("tables"):
+                for table_data in workflow_results["tables"]:
+                    st.markdown(f"**{table_data['title']}**")
+                    # Convert dict to dataframe for better display
+                    if isinstance(table_data['data'], dict):
+                        df = pd.DataFrame(table_data['data'])
+                        st.dataframe(df, use_container_width=True, hide_index=True)
+                    else:
+                        st.dataframe(table_data['data'], use_container_width=True)
+            
+            # Display plots (figure objects from workflow)
+            if workflow_results.get("plots"):
+                for fig in workflow_results["plots"]:
+                    st.plotly_chart(fig, use_container_width=True)
+            
+            # Display text
+            if workflow_results.get("text"):
+                for text in workflow_results["text"]:
+                    st.markdown(text)
+    else:
+        st.info("Select a workflow and click 'Execute Workflow' to analyze this file")
+elif not st.session_state.crsd_files:
+    st.info("No CRSD files found. Please scan a directory containing CRSD files.")
 else:
-    st.info("Please select a file source from the sidebar to begin")
-    
-    st.markdown("""
-    ### Features
-    
-    - **Workflow-Based Analysis**: Modular processing pipelines
-    - **Directory Browsing**: Scan entire directories for CRSD files
-    - **Quick Navigation**: Previous/Next buttons for fast file switching
-    - **Smart Caching**: Files loaded once and cached for performance
-    """)
+    st.info("Loading file...")
 
 # Footer
 st.sidebar.markdown("---")
