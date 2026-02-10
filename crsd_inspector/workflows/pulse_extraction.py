@@ -220,9 +220,7 @@ def apply_matched_filter(signal_data, reference_waveform, window_type='hamming')
     w = _make_window(len(ref_wfm), window_type)
     ref_wfm = ref_wfm * w
 
-    print(f"Applying matched filter to {len(signal_data)} samples...")
     mf_output = correlate(signal_data, np.conj(ref_wfm), mode='same', method='fft')
-    print("  ✓ Matched filter complete")
     return mf_output
 
 
@@ -236,106 +234,53 @@ def run_workflow(signal_data, metadata=None, **kwargs):
     min_prf_hz = float(metadata.get('min_prf_hz', 800))
     max_prf_hz = float(metadata.get('max_prf_hz', 1200))
     tx_wfm = metadata.get('tx_wfm', None)
-    
-    # Ground truth information (if available from metadata)
-    workflow.add_text("\n=== Ground Truth (from CRSD metadata) ===")
-    file_header_kvps = metadata.get('file_header_kvps', {})
-    if file_header_kvps:
-        # Extract truth parameters
-        truth_prf = float(file_header_kvps.get('PRF_HZ', 0))
-        stagger_pattern = file_header_kvps.get('STAGGER_PATTERN', 'unknown')
-        num_pulses_truth = int(file_header_kvps.get('NUM_PULSES', 0))
-        num_targets = int(file_header_kvps.get('NUM_TARGETS', 0))
-        
-        workflow.add_text([
-            f"Stagger Pattern: {stagger_pattern}",
-            f"Nominal PRF: {truth_prf:.1f} Hz",
-            f"Number of Pulses (Ground Truth): {num_pulses_truth}",
-            f"Number of Targets: {num_targets}",
-        ])
-        
-        # Display PRF pattern details
-        if stagger_pattern == "2-step":
-            stagger_ratio = 0.15  # Default from generator code
-            # Check if we can read the actual stagger ratio from metadata
-            if 'STAGGER_RATIO' in file_header_kvps:
-                stagger_ratio = float(file_header_kvps['STAGGER_RATIO'])
-            
-            prf_high = truth_prf / (1 - stagger_ratio)  # Shorter PRI = higher PRF
-            prf_low = truth_prf / (1 + stagger_ratio)   # Longer PRI = lower PRF
-            pri_high = 1.0 / prf_low  # Longer PRI in seconds
-            pri_low = 1.0 / prf_high  # Shorter PRI in seconds
-            workflow.add_text([
-                f"True PRF range (2-step): {prf_low:.1f} - {prf_high:.1f} Hz",
-                f"True PRI range: {pri_low*1e6:.1f} - {pri_high*1e6:.1f} μs",
-                f"  High PRF ({prf_high:.1f} Hz) = Short PRI ({pri_low*1e6:.1f} μs)",
-                f"  Low PRF ({prf_low:.1f} Hz) = Long PRI ({pri_high*1e6:.1f} μs)",
-            ])
-        elif stagger_pattern == "none":
-            # PRF walk pattern (custom)
-            workflow.add_text([
-                f"PRF Walk Pattern:",
-                f"  3 pulses @ 1000 Hz (PRI = 1000 μs)",
-                f"  3 pulses @ 1100 Hz (PRI = 909 μs)",
-                f"  3 pulses @ 1200 Hz (PRI = 833 μs)",
-                f"  ...repeating 9-pulse cycle",
-            ])
-        
-        # Target truth - handle both example_2 (5 targets) and example_4 (2 targets)
-        workflow.add_text([""])
-        if num_targets == 2:
-            # example_4.crsd
-            workflow.add_text([
-                "**Target Truth (from generation):**",
-                "  1. Target_A:  Range=2500m (16.7μs),  Doppler=+75Hz,  RCS=15dBsm",
-                "  2. Target_B:  Range=4000m (26.7μs),  Doppler=-45Hz,  RCS=12dBsm",
-            ])
-        elif num_targets == 5:
-            # example_2.crsd
-            workflow.add_text([
-                "**Target Truth (from generation):**",
-                "  1. Fast Car:     Range=1500m (10.0μs),  Doppler=+100Hz, RCS=8dBsm",
-                "  2. Truck:        Range=2800m (18.7μs),  Doppler=-50Hz,  RCS=12dBsm",
-                "  3. Motorcycle:   Range=3200m (21.3μs),  Doppler=+20Hz,  RCS=6dBsm",
-                "  4. Helicopter:   Range=4500m (30.0μs),  Doppler=-80Hz,  RCS=10dBsm",
-                "  5. Tower:        Range=6000m (40.0μs),  Doppler=+5Hz,   RCS=18dBsm",
-            ])
-        else:
-            workflow.add_text([f"**Target Truth:** {num_targets} targets (details not available)"])
-        
-        workflow.add_text([
-            "",
-            "Note: Range shown is one-way slant range. Round-trip time = 2×Range/c",
-        ])
-    else:
-        workflow.add_text("No ground truth metadata available")
 
     if signal_data.ndim == 1:
         signal_data = signal_data[None, :]
 
     total_samples = int(signal_data.shape[1])
-
-    workflow.add_text("Matched Filter Processing")
-    workflow.add_text([
-        f"Total samples: {total_samples:,}",
-        f"Sample rate: {sample_rate_hz/1e6:.1f} MHz",
-        f"Total time: {total_samples/sample_rate_hz*1000:.2f} ms",
-    ])
+    total_time_ms = total_samples / sample_rate_hz * 1000
+    shortest_pri_samples = int(sample_rate_hz / max_prf_hz)
+    shortest_pri_us = shortest_pri_samples / sample_rate_hz * 1e6
+    
+    # Create summary table
+    workflow.add_text("## Processing Parameters")
+    
+    file_header_kvps = metadata.get('file_header_kvps', {})
+    
+    # Build summary table data
+    summary_rows = [
+        ["Total Samples", f"{total_samples:,}"],
+        ["Sample Rate", f"{sample_rate_hz/1e6:.1f} MHz"],
+        ["Total Duration", f"{total_time_ms:.2f} ms"],
+        ["Range Window", window_type],
+        ["PRF Search Range", f"{min_prf_hz:.0f} - {max_prf_hz:.0f} Hz"],
+        ["Shortest PRI", f"{shortest_pri_us:.2f} μs ({shortest_pri_samples} samples)"],
+    ]
+    
+    if file_header_kvps:
+        stagger_pattern = file_header_kvps.get('STAGGER_PATTERN', 'unknown')
+        num_pulses_truth = int(file_header_kvps.get('NUM_PULSES', 0))
+        num_targets = int(file_header_kvps.get('NUM_TARGETS', 0))
+        summary_rows.extend([
+            ["", ""],
+            ["**Ground Truth**", ""],
+            ["Stagger Pattern", stagger_pattern],
+            ["Pulses (Truth)", str(num_pulses_truth)],
+            ["Targets", str(num_targets)],
+        ])
+    
+    workflow.add_table(["Parameter", "Value"], summary_rows)
 
     try:
         if tx_wfm is None:
             workflow.add_text("\nError: No reference waveform provided")
             return workflow.build()
 
-        import time
-        t0 = time.time()
-        workflow.add_text("\n=== Matched Filter ===")
+        workflow.add_text("\n## Matched Filter Output")
 
         mf_output = apply_matched_filter(signal_data, tx_wfm, window_type=window_type)
         mf_output_db = 10 * np.log10(np.abs(mf_output) ** 2 + 1e-12)
-
-        t1 = time.time()
-        workflow.add_text(f"MF output: {len(mf_output)} samples ({t1 - t0:.2f} sec)")
 
         # Plot matched filter output
         time_axis_ms = np.arange(len(mf_output_db)) / sample_rate_hz * 1000.0
@@ -355,17 +300,7 @@ def run_workflow(signal_data, metadata=None, **kwargs):
         workflow.add_plot(fig1)
 
         # Reshape data according to shortest PRI
-        workflow.add_text("\n=== Pulse Extraction (Fixed Sampling) ===")
-        
-        # Use shortest PRI (fastest PRF) for both step and window
-        shortest_pri_samples = int(sample_rate_hz / max_prf_hz)
-        shortest_pri_us = shortest_pri_samples / sample_rate_hz * 1e6
-        
-        workflow.add_text([
-            f"Max PRF: {max_prf_hz} Hz",
-            f"Shortest PRI: {shortest_pri_samples} samples ({shortest_pri_us:.2f} μs)",
-            f"Sampling every {shortest_pri_samples} samples",
-        ])
+        workflow.add_text("\n## Fixed-PRF Pulse Array")
         
         # Reshape: extract windows every shortest_pri samples
         num_windows = (len(mf_output) - shortest_pri_samples) // shortest_pri_samples
@@ -376,14 +311,11 @@ def run_workflow(signal_data, metadata=None, **kwargs):
             end_idx = start_idx + shortest_pri_samples
             windows_2d[i, :] = mf_output[start_idx:end_idx]
         
-        workflow.add_text(f"Reshaped to {num_windows} × {shortest_pri_samples} samples")
-        
         # Create 2D heatmap
         windows_2d_db = 10 * np.log10(np.abs(windows_2d) ** 2 + 1e-12)
         
         # Downsample for rendering
         heatmap_data, skip_x, skip_y = downsample_heatmap(windows_2d_db, max_width=2000, max_height=1000)
-        workflow.add_text(f"Heatmap shape: {windows_2d_db.shape} → {heatmap_data.shape} (downsampled {skip_x}x{skip_y})")
         
         # Time axes for heatmap
         fast_time_us = np.arange(heatmap_data.shape[1]) * skip_x / sample_rate_hz * 1e6
@@ -453,8 +385,8 @@ def run_workflow(signal_data, metadata=None, **kwargs):
         )
         workflow.add_plot(fig2)
 
-        # Compute PPC to find offsets between consecutive pulses
-        workflow.add_text("\n=== Pulse Detection & Filtering ===")
+        # Pulse detection using k-means clustering
+        workflow.add_text("\n## Pulse Detection (K-Means Clustering)")
         
         # Use k-means clustering to separate pulses from null/empty windows
         window_powers = np.mean(np.abs(windows_2d), axis=1)
@@ -482,14 +414,7 @@ def run_workflow(signal_data, metadata=None, **kwargs):
         # Compute cluster boundary as threshold for display
         power_threshold = (cluster_centers[null_cluster] + cluster_centers[pulse_cluster]) / 2
         
-        workflow.add_text([
-            f"Total windows: {num_windows}",
-            f"Windows with pulses: {num_pulses}",
-            f"Empty windows (rejected): {num_windows - num_pulses}",
-            f"Null cluster center: {10*np.log10(cluster_centers[null_cluster]**2 + 1e-12):.1f} dB",
-            f"Pulse cluster center: {10*np.log10(cluster_centers[pulse_cluster]**2 + 1e-12):.1f} dB",
-            f"Decision boundary: {10*np.log10(power_threshold**2 + 1e-12):.1f} dB",
-        ])
+        workflow.add_text(f"Detected **{num_pulses}** pulses (rejected {num_windows - num_pulses} empty windows)")
         
         # Plot window power statistic vs. k-means clusters
         window_powers_db = 10 * np.log10(window_powers**2 + 1e-12)
@@ -616,7 +541,7 @@ def run_workflow(signal_data, metadata=None, **kwargs):
         )
         workflow.add_plot(fig2c)
         
-        workflow.add_text("\n=== Pulse Pair Correlation ===")
+        workflow.add_text("\n## Pulse Pair Correlation")
         
         # Now do PPC on consecutive pulses (in the filtered list)
         num_pulse_pairs = num_pulses - 1
@@ -641,11 +566,6 @@ def run_workflow(signal_data, metadata=None, **kwargs):
         # Convert lags to time
         peak_lags_us = peak_lags / sample_rate_hz * 1e6
         
-        workflow.add_text([
-            f"Pulse pairs analyzed: {num_pulse_pairs}",
-            f"Peak lag range: {peak_lags.min()} to {peak_lags.max()} samples",
-        ])
-        
         # Plot PPC offsets
         if num_pulse_pairs > 0:
             fig3 = go.Figure()
@@ -668,8 +588,8 @@ def run_workflow(signal_data, metadata=None, **kwargs):
             )
             workflow.add_plot(fig3)
 
-        # Align pulses using cumulative offsets
-        workflow.add_text("\n=== Pulse Timing Analysis ===")
+        # Pulse timing analysis
+        workflow.add_text("\n## Pulse Timing & PRI Analysis")
         
         # For each pulse, detect where the pulse peak is within its window
         # This gives us the intra-window offset (where the pulse actually starts)
@@ -689,20 +609,10 @@ def run_workflow(signal_data, metadata=None, **kwargs):
         # Compute differences (actual position within window)
         time_correction_us = intra_window_offsets_us
         
-        workflow.add_text([
-            f"Raw start time range: {raw_start_times_us[0]:.2f} to {raw_start_times_us[-1]:.2f} μs",
-            f"Intra-window offset range: {intra_window_offsets_us.min():.2f} to {intra_window_offsets_us.max():.2f} μs",
-            f"Real start time range: {real_start_times_us[0]:.2f} to {real_start_times_us[-1]:.2f} μs",
-        ])
-        
         # Compute PRIs (time between consecutive pulses)
         if num_pulses > 1:
             pris_us = np.diff(real_start_times_us)
-            workflow.add_text([
-                f"PRI range: {pris_us.min():.2f} to {pris_us.max():.2f} μs",
-                f"PRI mean: {pris_us.mean():.2f} μs",
-                f"Corresponding PRF range: {1e6/pris_us.max():.1f} to {1e6/pris_us.min():.1f} Hz",
-            ])
+            workflow.add_text(f"**PRI Range:** {pris_us.min():.2f} - {pris_us.max():.2f} μs  |  **PRF Range:** {1e6/pris_us.max():.1f} - {1e6/pris_us.min():.1f} Hz")
         
         # Plot raw vs real start times
         fig3b = go.Figure()
@@ -786,16 +696,11 @@ def run_workflow(signal_data, metadata=None, **kwargs):
             )
             workflow.add_plot(fig3d)
         
-        workflow.add_text("\n=== PRI-Based Pulse Extraction ===")
+        workflow.add_text("\n## PRI-Based Pulse Re-Extraction")
         
         # Use the estimated PRIs to re-extract pulses from the MF output at correct positions
         # Start with the first detected pulse position
         first_pulse_sample = int(pulse_window_indices[0] * shortest_pri_samples + intra_window_offsets[0])
-        
-        workflow.add_text([
-            f"First pulse position: {first_pulse_sample} samples ({first_pulse_sample/sample_rate_hz*1e6:.2f} μs)",
-            f"Re-extracting pulses using estimated PRIs...",
-        ])
         
         # Build pulse extraction positions based on PRIs
         pulse_positions_samples = [first_pulse_sample]
@@ -808,11 +713,6 @@ def run_workflow(signal_data, metadata=None, **kwargs):
         
         # Define extraction window size (use longest PRI as window size)
         extraction_window_samples = int(np.max(pris_us) * sample_rate_hz / 1e6) if num_pulses > 1 else shortest_pri_samples
-        
-        workflow.add_text([
-            f"Extraction window size: {extraction_window_samples} samples ({extraction_window_samples/sample_rate_hz*1e6:.2f} μs)",
-            f"Extracting {num_pulses} pulses from matched filter output...",
-        ])
         
         # Extract pulses from MF output at the computed positions
         pulses_extracted = np.zeros((num_pulses, extraction_window_samples), dtype=complex)
@@ -834,7 +734,6 @@ def run_workflow(signal_data, metadata=None, **kwargs):
         
         # Downsample for rendering
         heatmap_extracted, skip_x_e, skip_y_e = downsample_heatmap(pulses_extracted_db, max_width=2000, max_height=1000)
-        workflow.add_text(f"PRI-extracted heatmap: {pulses_extracted_db.shape} → {heatmap_extracted.shape} (downsampled {skip_x_e}x{skip_y_e})")
         
         # Time axes for extracted pulses heatmap
         fast_time_extracted_us = np.arange(heatmap_extracted.shape[1]) * skip_x_e / sample_rate_hz * 1e6
@@ -996,11 +895,7 @@ def run_workflow(signal_data, metadata=None, **kwargs):
         range_doppler = np.zeros((num_doppler_bins, num_range_bins), dtype=complex)
         
         # Compute NUFFT: F[k] = sum_j c_j * exp(-2πi * f_k * t_j)
-        print(f"  Computing NUFFT for {num_range_bins} range bins...")
         for range_bin in range(num_range_bins):
-            if range_bin % 1000 == 0:
-                print(f"    Progress: {range_bin}/{num_range_bins}")
-            
             # Get signal across all pulses for this range bin
             signal = pulses_trimmed[:, range_bin] * slow_time_window
             
@@ -1015,21 +910,11 @@ def run_workflow(signal_data, metadata=None, **kwargs):
         # Convert to dB
         range_doppler_db = 10 * np.log10(np.abs(range_doppler) ** 2 + 1e-12)
         
-        workflow.add_text([
-            f"Range-Doppler power range: {range_doppler_db.min():.1f} to {range_doppler_db.max():.1f} dB",
-            f"Range-Doppler shape: {range_doppler_db.shape}",
-        ])
-        
-        workflow.add_text([
-            f"Doppler FFT size: {num_pulses} pulses",
-            f"Average PRI: {avg_pri_s*1e6:.2f} μs",
-            f"Doppler resolution: {doppler_resolution_hz:.2f} Hz",
-            f"Doppler frequency range: {doppler_freqs_hz[0]:.1f} to {doppler_freqs_hz[-1]:.1f} Hz",
-        ])
+        workflow.add_text(f"\n## Range-Doppler Map (NUFFT)")
+        workflow.add_text(f"**Doppler Resolution:** {doppler_resolution_hz:.2f} Hz  |  **Doppler Range:** {doppler_freqs_hz[0]:.1f} - {doppler_freqs_hz[-1]:.1f} Hz")
         
         # Downsample for rendering
         heatmap_rd, skip_x_rd, skip_y_rd = downsample_heatmap(range_doppler_db, max_width=2000, max_height=1000)
-        workflow.add_text(f"Range-Doppler heatmap: {range_doppler_db.shape} → {heatmap_rd.shape} (downsampled {skip_x_rd}x{skip_y_rd})")
         
         # Time and frequency axes
         fast_time_rd_us = np.arange(heatmap_rd.shape[1]) * skip_x_rd / sample_rate_hz * 1e6
