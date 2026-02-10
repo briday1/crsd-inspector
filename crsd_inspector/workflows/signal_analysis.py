@@ -28,10 +28,10 @@ PARAMS = {
     'num_pulses_to_stack': {
         'type': 'number',
         'label': 'Number of Pulses to Stack',
-        'default': 100,
-        'min': 10,
-        'max': 10000,
-        'help': 'Number of pulses to extract and stack for analysis'
+        'default': -1,
+        'min': -1,
+        'max': 100000,
+        'help': 'Number of pulses to extract and stack for analysis (-1 = use all available)'
     },
     'downsample_range_factor': {
         'type': 'number',
@@ -145,7 +145,11 @@ def _create_graph(signal_data, metadata):
         
         # Calculate how many pulses we can extract
         max_pulses = total_samples // pri_samples
-        actual_num_pulses = min(num_pulses, max_pulses)
+        # If num_pulses is -1, use all available pulses
+        if num_pulses <= 0:
+            actual_num_pulses = max_pulses
+        else:
+            actual_num_pulses = min(num_pulses, max_pulses)
         
         # Extract pulses
         pulses = np.zeros((actual_num_pulses, pri_samples), dtype=signal.dtype)
@@ -247,7 +251,8 @@ def _create_graph(signal_data, metadata):
             'quality_metrics': quality_metrics,
             'iq_stats': iq_stats,
             'amp_flat': amp_flat,
-            'phase_flat': phase_flat
+            'phase_flat': phase_flat,
+            'pulses': pulses  # Pass through for PSD calculation
         }
     
     graph.add(
@@ -262,7 +267,8 @@ def _create_graph(signal_data, metadata):
             ('quality_metrics', 'quality_metrics'),
             ('iq_stats', 'iq_stats'),
             ('amp_flat', 'amp_flat'),
-            ('phase_flat', 'phase_flat')
+            ('phase_flat', 'phase_flat'),
+            ('pulses', 'pulses')  # Pass through for PSD
         ]
     )
     
@@ -441,3 +447,42 @@ def _format_results(context, metadata):
     iq_stats = context.get('iq_stats')
     if iq_stats:
         workflow.add_table("I/Q Statistics", iq_stats)
+    
+    # Power Spectral Density
+    pulses = context.get('pulses')
+    if pulses is not None:
+        # Compute PSD along slow-time (Doppler) for each range bin
+        # Average over selected range bins for visualization
+        num_pulses, num_range = pulses.shape
+        
+        # Select middle range bins for PSD calculation
+        mid_start = num_range // 4
+        mid_end = 3 * num_range // 4
+        pulses_mid = pulses[:, mid_start:mid_end]
+        
+        # Compute FFT along slow-time dimension (Doppler)
+        fft_data = np.fft.fftshift(np.fft.fft(pulses_mid, axis=0), axes=0)
+        psd = np.mean(np.abs(fft_data)**2, axis=1)  # Average over range bins
+        psd_db = 10 * np.log10(psd + 1e-10)
+        
+        # Frequency axis (Doppler bins)
+        doppler_freqs = np.fft.fftshift(np.fft.fftfreq(num_pulses, d=1/prf_hz))
+        
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(
+            x=doppler_freqs,
+            y=psd_db,
+            mode='lines',
+            line=dict(color='cyan', width=2),
+            name='PSD'
+        ))
+        
+        fig.update_layout(
+            title="Power Spectral Density (Doppler Domain)",
+            xaxis_title="Doppler Frequency (Hz)",
+            yaxis_title="Power (dB)",
+            height=400,
+            template='plotly_dark',
+            showlegend=False
+        )
+        workflow.add_plot(fig)

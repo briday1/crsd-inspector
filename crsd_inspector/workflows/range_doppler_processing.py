@@ -1,5 +1,5 @@
 """
-Pulse Extraction Workflow (Dagex version)
+Range Doppler Processing Workflow (Dagex version)
 
 Modular matched filter processing for continuous staggered-PRF radar data.
 """
@@ -14,7 +14,7 @@ from dagex import Graph
 
 # Create workflow instance
 workflow = Workflow(
-    name="Signal Processing",
+    name="Range Doppler Processing",
     description="Full processing pipeline: pulse extraction through Doppler compression"
 )
 
