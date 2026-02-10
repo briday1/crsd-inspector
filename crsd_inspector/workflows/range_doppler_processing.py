@@ -1230,7 +1230,7 @@ def _add_plots(results, metadata):
             z=heatmap_rd,
             x=fast_time_rd_us,
             y=doppler_freqs_display[:heatmap_rd.shape[0]],
-            colorscale='Jet',
+            colorscale='HSV',
             colorbar=dict(title='Power (dB)'),
             zmin=rd_min_default,
             zmax=rd_peak,

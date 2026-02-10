@@ -350,7 +350,7 @@ def _format_results(context, metadata):
         
         fig = go.Figure(data=go.Heatmap(
             z=amp_db,
-            colorscale='Jet',
+            colorscale='HSV',
             zmin=amp_min_default,
             zmax=amp_max_default,
             colorbar=dict(title="Amplitude (dB)", x=1.15)
