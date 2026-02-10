@@ -12,6 +12,8 @@ import importlib.util
 from datetime import datetime
 from pathlib import Path
 import glob
+import tkinter as tk
+from tkinter import filedialog
 
 try:
     import dagex
@@ -235,12 +237,29 @@ if not st.session_state.auto_scanned:
             st.session_state.current_file_index = 0
     st.session_state.auto_scanned = True
 
-# Directory input with scan button
-directory_path = st.sidebar.text_input(
-    "Directory Path",
-    value="./examples",
-    help="Enter path to directory containing CRSD files"
-)
+# Directory input with browse and scan buttons
+col1, col2 = st.sidebar.columns([3, 1])
+with col1:
+    directory_path = st.text_input(
+        "Directory Path",
+        value="./examples",
+        help="Enter path to directory containing CRSD files",
+        key="directory_path_input",
+        label_visibility="collapsed"
+    )
+with col2:
+    if st.button("📁", help="Browse for directory", use_container_width=True, key="browse_dir_btn"):
+        # Create a hidden tkinter root window
+        root = tk.Tk()
+        root.withdraw()
+        root.wm_attributes('-topmost', 1)
+        selected_dir = filedialog.askdirectory(master=root, initialdir=directory_path)
+        root.destroy()
+        if selected_dir:
+            st.session_state.directory_path_input = selected_dir
+            st.rerun()
+
+st.sidebar.write("Directory Path")  # Label above the inputs
 
 if st.sidebar.button("Scan Directory", use_container_width=True):
     if os.path.isdir(directory_path):
@@ -377,11 +396,42 @@ if st.session_state.selected_workflow:
                 st.session_state.workflow_params[param_key] = value
                 
             elif param_type == 'text':
-                value = st.sidebar.text_input(
-                    label,
-                    value=str(default) if default is not None else '',
-                    key=f"param_{param_key}"
-                )
+                # Check if this is a file path parameter
+                is_file_param = any(keyword in param_key.lower() for keyword in ['file', 'path', 'crsd'])
+                
+                if is_file_param:
+                    # Render with file browser button
+                    col1, col2 = st.sidebar.columns([3, 1])
+                    with col1:
+                        value = st.text_input(
+                            label,
+                            value=str(default) if default is not None else '',
+                            key=f"param_{param_key}",
+                            label_visibility="visible"
+                        )
+                    with col2:
+                        st.write("")  # Spacing to align with input
+                        if st.button("📁", help="Browse for file", use_container_width=True, key=f"browse_{param_key}"):
+                            # Create a hidden tkinter root window
+                            root = tk.Tk()
+                            root.withdraw()
+                            root.wm_attributes('-topmost', 1)
+                            selected_file = filedialog.askopenfilename(
+                                master=root,
+                                initialdir=os.path.dirname(value) if value and os.path.exists(os.path.dirname(value)) else ".",
+                                filetypes=[("CRSD Files", "*.crsd"), ("All Files", "*.*")]
+                            )
+                            root.destroy()
+                            if selected_file:
+                                st.session_state[f"param_{param_key}"] = selected_file
+                                st.rerun()
+                else:
+                    # Regular text input
+                    value = st.sidebar.text_input(
+                        label,
+                        value=str(default) if default is not None else '',
+                        key=f"param_{param_key}"
+                    )
                 st.session_state.workflow_params[param_key] = value
     
     # Execute button at the end of sidebar
