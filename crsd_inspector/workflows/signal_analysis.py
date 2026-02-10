@@ -402,7 +402,8 @@ def _format_results(context, metadata):
         fig.update_layout(
             title="Amplitude Distribution",
             xaxis_title="Amplitude",
-            yaxis_title="Count",
+            yaxis_title="Count (log scale)",
+            yaxis_type="log",
             height=400,
             template='plotly_dark'
         )
