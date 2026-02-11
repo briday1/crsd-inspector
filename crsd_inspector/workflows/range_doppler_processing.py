@@ -10,6 +10,7 @@ from crsd_inspector.workflows.workflow import Workflow
 from scipy.signal import correlate
 from sklearn.cluster import KMeans
 from dagex import Graph
+import time
 
 
 # Create workflow instance
@@ -17,6 +18,55 @@ workflow = Workflow(
     name="Range Doppler Processing",
     description="Full processing pipeline: pulse extraction through Doppler compression"
 )
+
+# Ordered node metadata used for execution reporting
+NODE_EXECUTION_PLAN = [
+    ("Provide Data", "Load signal, TX waveform, and processing parameters", "total_samples"),
+    ("Matched Filter", "Correlate RX signal with TX waveform", "mf_output"),
+    ("Fixed-PRF Windows", "Reshape matched-filter output into fixed windows", "windows_2d"),
+    ("Pulse Detection", "Detect pulse-bearing windows via k-means", "num_pulses"),
+    ("Pulse Timing Analysis", "Estimate pulse start times and PRIs", "pris_us"),
+    ("Detect PRFs (Cluster & Snap)", "Estimate PRF modes and limits from PRI data", "detected_prfs_hz"),
+    ("Filter Pulses by PRF Bounds", "Reject pulses outside allowed PRI/PRF bounds", "num_pulses_filtered"),
+    ("PRI-Based Extraction", "Extract pulse windows using detected pulse positions", "pulses_extracted"),
+    ("NUFFT Doppler", "Perform Doppler compression on nonuniform PRI pulses", "range_doppler_db"),
+]
+
+NODE_DESCRIPTIONS = {name: desc for name, desc, _ in NODE_EXECUTION_PLAN}
+
+
+def _emit_progress(metadata, step, status, detail=""):
+    """Emit optional progress events to the app UI."""
+    if metadata is None:
+        return
+    callback = metadata.get('_progress_callback')
+    if callable(callback):
+        callback(step=step, status=status, detail=detail)
+
+
+def _tracked_node(fn, label, metadata):
+    """Wrap a graph node with progress callbacks."""
+    detail = NODE_DESCRIPTIONS.get(label, "")
+
+    def _wrapped(inputs):
+        _emit_progress(metadata, label, "running", detail)
+        start_time = time.perf_counter()
+        try:
+            output = fn(inputs)
+        except Exception:
+            if metadata is not None:
+                timings = metadata.setdefault('_node_execution_times_s', {})
+                timings[label] = None
+            _emit_progress(metadata, label, "failed", detail)
+            raise
+        elapsed_s = time.perf_counter() - start_time
+        if metadata is not None:
+            timings = metadata.setdefault('_node_execution_times_s', {})
+            timings[label] = elapsed_s
+        _emit_progress(metadata, label, "done", f"{detail} ({elapsed_s:.3f}s)")
+        return output
+
+    return _wrapped
 
 # Workflow parameters
 PARAMS = {
@@ -536,6 +586,7 @@ def run_workflow(signal_data, metadata=None, **kwargs):
     
     if metadata is None:
         metadata = {}
+    metadata.setdefault('_node_execution_times_s', {})
     
     tx_wfm = metadata.get('tx_wfm')
     if tx_wfm is None:
@@ -543,11 +594,15 @@ def run_workflow(signal_data, metadata=None, **kwargs):
         return workflow.build()
     
     # Create and execute graph
+    _emit_progress(metadata, "Build Graph", "running", "Initialize processing pipeline")
     graph = _create_graph(signal_data, metadata)
+    _emit_progress(metadata, "Build Graph", "done", "Initialize processing pipeline")
     
     try:
+        _emit_progress(metadata, "Execute Graph", "running", "Run all processing nodes")
         dag = graph.build()
         result = dag.execute(True, 4)
+        _emit_progress(metadata, "Execute Graph", "done", "Run all processing nodes")
         
         # Extract context - try multiple methods
         context = None
@@ -566,6 +621,7 @@ def run_workflow(signal_data, metadata=None, **kwargs):
             
     except Exception as e:
         import traceback
+        _emit_progress(metadata, "Execute Graph", "failed", "Run all processing nodes")
         error_msg = f"Error executing graph: {str(e)}"
         workflow.add_text(error_msg)
         workflow.add_text("Stack trace:")
@@ -578,7 +634,9 @@ def run_workflow(signal_data, metadata=None, **kwargs):
         return workflow.build()
     
     # Format and return results
+    _emit_progress(metadata, "Format Results", "running", "Build tables and plots")
     _format_results(context, metadata)
+    _emit_progress(metadata, "Format Results", "done", "Build tables and plots")
     return workflow.build()
 
 
@@ -606,7 +664,7 @@ def _create_graph(signal_data, metadata):
     
     # Provide initial data
     graph.add(
-        lambda inputs: {
+        _tracked_node(lambda inputs: {
             'signal_data': signal_data,
             'tx_wfm': tx_wfm,
             'window_type': window_type,
@@ -620,7 +678,7 @@ def _create_graph(signal_data, metadata):
             'nufft_kernel': nufft_kernel,
             'shortest_pri_samples': shortest_pri_samples,
             'total_samples': total_samples
-        },
+        }, "Provide Data", metadata),
         label="Provide Data",
         inputs=[],
         outputs=[
@@ -642,7 +700,7 @@ def _create_graph(signal_data, metadata):
     
     # Always use matched filter with TX waveform
     graph.add(
-        node_matched_filter,
+        _tracked_node(node_matched_filter, "Matched Filter", metadata),
         label="Matched Filter",
         inputs=[
             ('signal_data', 'signal_data'),
@@ -657,7 +715,7 @@ def _create_graph(signal_data, metadata):
     
     # Fixed-PRF windowing
     graph.add(
-        node_fixed_prf_windows,
+        _tracked_node(node_fixed_prf_windows, "Fixed-PRF Windows", metadata),
         label="Fixed-PRF Windows",
         inputs=[
             ('mf_output', 'mf_output'),
@@ -672,7 +730,7 @@ def _create_graph(signal_data, metadata):
     
     # Pulse detection
     graph.add(
-        node_pulse_detection,
+        _tracked_node(node_pulse_detection, "Pulse Detection", metadata),
         label="Pulse Detection",
         inputs=[
             ('windows_2d', 'windows_2d'),
@@ -694,7 +752,7 @@ def _create_graph(signal_data, metadata):
     
     # Pulse timing analysis
     graph.add(
-        node_pulse_timing,
+        _tracked_node(node_pulse_timing, "Pulse Timing Analysis", metadata),
         label="Pulse Timing Analysis",
         inputs=[
             ('pulses_2d', 'pulses_2d'),
@@ -715,7 +773,7 @@ def _create_graph(signal_data, metadata):
     
     # Auto-detect PRFs from PRI distribution
     graph.add(
-        node_detect_prfs,
+        _tracked_node(node_detect_prfs, "Detect PRFs (Cluster & Snap)", metadata),
         label="Detect PRFs (Cluster & Snap)",
         inputs=[
             ('pris_us', 'pris_us'),
@@ -735,7 +793,7 @@ def _create_graph(signal_data, metadata):
     
     # Filter pulses by PRF bounds
     graph.add(
-        node_filter_pulses_by_prf_bounds,
+        _tracked_node(node_filter_pulses_by_prf_bounds, "Filter Pulses by PRF Bounds", metadata),
         label="Filter Pulses by PRF Bounds",
         inputs=[
             ('detected_min_prf_hz', 'detected_min_prf_hz'),
@@ -753,7 +811,7 @@ def _create_graph(signal_data, metadata):
     
     # PRI-based extraction
     graph.add(
-        node_pri_based_extraction,
+        _tracked_node(node_pri_based_extraction, "PRI-Based Extraction", metadata),
         label="PRI-Based Extraction",
         inputs=[
             ('mf_output', 'mf_output'),
@@ -772,7 +830,7 @@ def _create_graph(signal_data, metadata):
     
     # NUFFT Doppler compression
     graph.add(
-        node_nufft_doppler,
+        _tracked_node(node_nufft_doppler, "NUFFT Doppler", metadata),
         label="NUFFT Doppler",
         inputs=[
             ('pulses_extracted', 'pulses_extracted'),
@@ -810,6 +868,26 @@ def _format_results(context, metadata):
     
     # Debug output - show ALL keys
     result_keys = sorted(str(k) for k in results.keys())
+
+    # Node-by-node execution summary with execution durations
+    timings = metadata.get('_node_execution_times_s', {})
+    node_names = []
+    node_actions = []
+    node_times = []
+    for node_name, node_action, success_key in NODE_EXECUTION_PLAN:
+        node_names.append(node_name)
+        node_actions.append(node_action)
+        elapsed_s = timings.get(node_name)
+        if elapsed_s is not None:
+            node_times.append(f"{elapsed_s:.3f}")
+        else:
+            node_times.append("N/A")
+
+    workflow.add_table("Workflow Execution Time (Node-by-Node)", {
+        "Step": node_names,
+        "What It Does": node_actions,
+        "Execution Time (s)": node_times,
+    })
     
     workflow.add_text(f"**Filter Type:** Matched Filter (TX waveform)")
     

@@ -467,33 +467,74 @@ if st.session_state.selected_workflow:
     )
     
     if execute_clicked and current_data:
-        with st.spinner(f"Executing workflow on channel {st.session_state.selected_channel}..."):
-            # Prepare metadata with workflow parameters
-            workflow_metadata = current_data['metadata'].copy()
-            
-            # Add workflow parameters from session state
-            if 'workflow_params' in st.session_state:
-                workflow_metadata.update(st.session_state.workflow_params)
-            
-            # Check if a TX file was selected and load its waveform
-            tx_wfm_to_use = current_data.get('tx_wfm')
-            tx_file_path = workflow_metadata.get('tx_crsd_file', '').strip()
-            if tx_file_path and os.path.isfile(tx_file_path):
-                tx_wfm_from_file = load_tx_waveform(tx_file_path)
-                if tx_wfm_from_file is not None:
-                    tx_wfm_to_use = tx_wfm_from_file
-                    st.success(f"Loaded TX waveform from: {os.path.basename(tx_file_path)}")
-            
-            workflow_results = execute_workflow(
-                st.session_state.selected_workflow['module'],
-                current_data['channel_data'],
-                st.session_state.selected_channel,
-                tx_wfm_to_use,
-                workflow_metadata
-            )
-            
-            # Store results in session state to persist across reruns
-            st.session_state.last_workflow_results = workflow_results
+        status_panel = st.status(
+            f"Executing workflow on channel {st.session_state.selected_channel}...",
+            state="running",
+            expanded=True
+        )
+        with status_panel:
+            progress_window = st.empty()
+        max_visible_entries = 5
+        completed_entries = []
+        progress_state = {'active_entry': None}
+
+        def render_progress_window():
+            active_entry = progress_state['active_entry']
+            if active_entry is not None:
+                visible_done = completed_entries[-(max_visible_entries - 1):]
+                lines = visible_done + [active_entry]
+            else:
+                lines = completed_entries[-max_visible_entries:]
+            progress_window.markdown("\n".join(f"- {line}" for line in lines))
+
+        def progress_callback(step, status, detail=""):
+            line = f"**{step}**"
+            if detail:
+                line += f" - {detail}"
+            if status == "running":
+                progress_state['active_entry'] = f"⏳ {line}"
+            elif status == "done":
+                completed_entries.append(f"✅ {line}")
+                progress_state['active_entry'] = None
+            elif status == "failed":
+                completed_entries.append(f"❌ {line}")
+                progress_state['active_entry'] = None
+            render_progress_window()
+
+        # Prepare metadata with workflow parameters
+        workflow_metadata = current_data['metadata'].copy()
+        
+        # Add workflow parameters from session state
+        if 'workflow_params' in st.session_state:
+            workflow_metadata.update(st.session_state.workflow_params)
+        
+        # Attach progress callback so workflow can stream execution updates
+        workflow_metadata['_progress_callback'] = progress_callback
+        
+        # Check if a TX file was selected and load its waveform
+        tx_wfm_to_use = current_data.get('tx_wfm')
+        tx_file_path = workflow_metadata.get('tx_crsd_file', '').strip()
+        if tx_file_path and os.path.isfile(tx_file_path):
+            tx_wfm_from_file = load_tx_waveform(tx_file_path)
+            if tx_wfm_from_file is not None:
+                tx_wfm_to_use = tx_wfm_from_file
+                st.success(f"Loaded TX waveform from: {os.path.basename(tx_file_path)}")
+        
+        workflow_results = execute_workflow(
+            st.session_state.selected_workflow['module'],
+            current_data['channel_data'],
+            st.session_state.selected_channel,
+            tx_wfm_to_use,
+            workflow_metadata
+        )
+        
+        if workflow_results is None:
+            status_panel.update(label="Workflow failed", state="error")
+        else:
+            status_panel.update(label="Workflow complete", state="complete")
+        
+        # Store results in session state to persist across reruns
+        st.session_state.last_workflow_results = workflow_results
 
 # Main content
 if st.session_state.crsd_files and current_data:
