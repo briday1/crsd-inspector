@@ -9,6 +9,8 @@ import tempfile
 import os
 import sys
 import importlib.util
+import time
+import html
 from datetime import datetime
 from pathlib import Path
 import glob
@@ -474,27 +476,61 @@ if st.session_state.selected_workflow:
         )
         with status_panel:
             progress_window = st.empty()
-        max_visible_entries = 5
         completed_entries = []
         progress_state = {'active_entry': None}
+        step_start_times = {}
 
         def render_progress_window():
             active_entry = progress_state['active_entry']
             if active_entry is not None:
-                visible_done = completed_entries[-(max_visible_entries - 1):]
-                lines = visible_done + [active_entry]
+                lines = completed_entries + [active_entry]
             else:
-                lines = completed_entries[-max_visible_entries:]
-            progress_window.markdown("\n".join(f"- {line}" for line in lines))
+                lines = completed_entries
+            html_lines = []
+            for line in lines:
+                if line.startswith("__RUNNING__::"):
+                    running_text = html.escape(line.replace("__RUNNING__::", "", 1))
+                    html_lines.append(
+                        "<li><span class='rd-live-spinner'></span>"
+                        f"{running_text}</li>"
+                    )
+                else:
+                    html_lines.append(f"<li>{html.escape(line)}</li>")
+            progress_window.markdown(
+                (
+                    "<style>"
+                    ".rd-live-scroll{max-height:12rem;overflow-y:auto;padding-right:0.3rem;}"
+                    ".rd-live-list{margin:0.25rem 0 0.25rem 1.1rem;padding:0;}"
+                    ".rd-live-list li{margin:0.2rem 0;list-style:disc;}"
+                    ".rd-live-spinner{display:inline-block;width:0.85rem;height:0.85rem;"
+                    "margin-right:0.45rem;border:2px solid currentColor;border-top-color:transparent;"
+                    "border-radius:50%;vertical-align:-0.1rem;animation:rdspin 0.8s linear infinite;}"
+                    "@keyframes rdspin{to{transform:rotate(360deg);}}"
+                    "</style>"
+                    f"<div class='rd-live-scroll'><ul class='rd-live-list'>{''.join(html_lines)}</ul></div>"
+                ),
+                unsafe_allow_html=True
+            )
 
         def progress_callback(step, status, detail=""):
-            line = f"**{step}**"
+            line = f"{step}"
             if detail:
                 line += f" - {detail}"
             if status == "running":
-                progress_state['active_entry'] = f"⏳ {line}"
+                step_start_times[step] = time.perf_counter()
+                progress_state['active_entry'] = f"__RUNNING__::{line}"
+                status_panel.update(
+                    label=f"Executing: {step}...",
+                    state="running",
+                    expanded=True
+                )
             elif status == "done":
-                completed_entries.append(f"✅ {line}")
+                started = step_start_times.get(step)
+                if started is not None:
+                    elapsed_s = time.perf_counter() - started
+                    completed_entries.append(f"✔️ {line} ({elapsed_s:.3f}s)")
+                else:
+                    completed_entries.append(f"✔️ {line}")
                 progress_state['active_entry'] = None
             elif status == "failed":
                 completed_entries.append(f"❌ {line}")

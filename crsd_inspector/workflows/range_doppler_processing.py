@@ -63,7 +63,7 @@ def _tracked_node(fn, label, metadata):
         if metadata is not None:
             timings = metadata.setdefault('_node_execution_times_s', {})
             timings[label] = elapsed_s
-        _emit_progress(metadata, label, "done", f"{detail} ({elapsed_s:.3f}s)")
+        _emit_progress(metadata, label, "done", detail)
         return output
 
     return _wrapped
