@@ -68,24 +68,10 @@ PARAMS = {
         'default': '1000,1200,1500',
     },
     'tx_crsd_file': {
-        'label': 'TX CRSD File (optional)',
+        'label': 'TX CRSD File (required)',
         'type': 'text',
         'default': '',
-        'help': 'Path to transmit waveform CRSD file (will extract TX waveform and PRF if provided)'
-    },
-    'use_lowpass_filter': {
-        'label': 'Use Lowpass Filter (if no TX waveform)',
-        'type': 'checkbox',
-        'default': False,
-        'help': 'Apply lowpass filter instead of matched filter when TX waveform unavailable'
-    },
-    'lowpass_bandwidth_mhz': {
-        'label': 'Lowpass Bandwidth (MHz)',
-        'type': 'number',
-        'default': 10.0,
-        'min': 0.1,
-        'max': 100.0,
-        'help': 'Cutoff frequency for lowpass filter'
+        'help': 'Path to transmit waveform CRSD file'
     },
     'nufft_kernel': {
         'label': 'NUFFT Kernel',
@@ -135,9 +121,8 @@ def node_matched_filter(inputs):
     if signal_data.ndim > 1:
         signal_data = signal_data.ravel()
     
+    # Use TX waveform as-is without modification
     ref_wfm = tx_wfm.copy()
-    w = _make_window(len(ref_wfm), range_window_type)
-    ref_wfm = ref_wfm * w
     
     mf_output = correlate(signal_data, np.conj(ref_wfm), mode='same', method='fft')
     mf_output_db = 10 * np.log10(np.abs(mf_output) ** 2 + 1e-12)
@@ -184,7 +169,7 @@ def node_pulse_detection(inputs):
     cluster_labels = kmeans.fit_predict(window_powers.reshape(-1, 1))
     cluster_centers = kmeans.cluster_centers_.flatten()
     
-    # Determine which cluster is the null/empty pulses (lower power)
+    # Determine which cluster is the null/empty pulses (lowest power)
     null_cluster = np.argmin(cluster_centers)
     pulse_cluster = 1 - null_cluster
     
@@ -360,6 +345,44 @@ def node_detect_prfs(inputs):
     }
 
 
+def node_filter_pulses_by_prf_bounds(inputs):
+    """Filter out pulses whose measured PRI falls outside the detected PRF bounds"""
+    detected_min_prf_hz = inputs.get('detected_min_prf_hz')
+    detected_max_prf_hz = inputs.get('detected_max_prf_hz')
+    pulse_positions_samples = inputs['pulse_positions_samples']
+    pris_us = inputs['pris_us']
+    num_pulses = inputs['num_pulses']
+    
+    # Always need bounds to filter
+    if detected_min_prf_hz is None or detected_max_prf_hz is None or num_pulses < 2:
+        return {
+            'pulse_positions_samples': pulse_positions_samples,
+            'pris_us': pris_us,
+            'num_pulses': num_pulses
+        }
+    
+    # Convert PRF bounds to PRI bounds (in microseconds)
+    # PRF = 1e6 / PRI, so PRI = 1e6 / PRF
+    max_pri_us = 1e6 / detected_min_prf_hz  # Slowest (longest) acceptable PRI
+    min_pri_us = 1e6 / detected_max_prf_hz  # Fastest (shortest) acceptable PRI
+    
+    # Find which PRIs are within bounds
+    pri_valid_mask = (pris_us >= min_pri_us) & (pris_us <= max_pri_us)
+    valid_indices = np.where(pri_valid_mask)[0]
+    
+    # If no valid PRIs found, still filter (don't pass through unchanged)
+    # This prevents propagating out-of-bounds pulses
+    filtered_positions = pulse_positions_samples[valid_indices] if len(valid_indices) > 0 else np.array([])
+    filtered_pris = pris_us[valid_indices] if len(valid_indices) > 0 else np.array([])
+    filtered_num = len(valid_indices)
+    
+    return {
+        'pulse_positions_samples': filtered_positions,
+        'pris_us': filtered_pris,
+        'num_pulses': filtered_num
+    }
+
+
 def node_pri_based_extraction(inputs):
     """Re-extract pulses using estimated PRIs"""
     mf_output = inputs['mf_output']
@@ -399,186 +422,108 @@ def node_pri_based_extraction(inputs):
 
 def node_nufft_doppler(inputs):
     """Perform NUFFT Doppler compression on extracted pulses (or FFT if uniform PRF)"""
-    pulses_extracted = inputs['pulses_extracted']
-    pulse_positions_samples = inputs['pulse_positions_samples']
-    pris_us = inputs['pris_us']
-    sample_rate_hz = inputs['sample_rate_hz']
-    num_pulses = inputs['num_pulses']
-    extraction_window_samples = inputs['extraction_window_samples']
-    window_type = inputs['window_type']
-    nufft_kernel = inputs.get('nufft_kernel', 'direct')
-    
-    # Use the actual pulse positions (in samples) from PRI-based extraction
-    pulse_times_s = pulse_positions_samples / sample_rate_hz
-    
-    # Make times relative to first pulse
-    pulse_times_relative_s = pulse_times_s - pulse_times_s[0]
-    t_span = pulse_times_relative_s[-1]
-    
-    # Apply window function across slow time (Doppler dimension)
-    slow_time_window = _make_window(num_pulses, window_type)
-    
-    # Compute Doppler parameters
-    # For staggered PRF, use the minimum PRF (longest PRI) to get unambiguous Nyquist
-    max_pri_s = np.max(pris_us) / 1e6 if num_pulses > 1 else 1.0
-    min_prf = 1.0 / max_pri_s
-    nyquist_doppler = min_prf / 2.0
-    
-    # For NUFFT, the frequency resolution is 1/t_span
-    doppler_resolution_hz = 1.0 / t_span if t_span > 0 else 1.0
-    num_doppler_bins = num_pulses
-    
-    # Create frequency grid centered at zero, spanning +/- Nyquist
-    doppler_freqs_hz = np.linspace(-nyquist_doppler, nyquist_doppler, num_doppler_bins)
-    
-    # Use more range bins - up to 10000 or available
-    max_range_bins = min(10000, extraction_window_samples)
-    pulses_trimmed = pulses_extracted[:, :max_range_bins]
-    num_range_bins = pulses_trimmed.shape[1]
-    
-    # Check if PRF is uniform (single PRF) - if so, use FFT instead of NUFFT
-    pri_variation = np.std(pris_us) / np.mean(pris_us) if len(pris_us) > 0 else 0
-    is_uniform_prf = pri_variation < 0.01  # Less than 1% variation
-    
-    if is_uniform_prf and num_pulses > 1:
-        # Uniform PRF detected - use regular FFT (much faster)
-        avg_prf = 1e6 / np.mean(pris_us)
-        nyquist_doppler = avg_prf / 2.0
+    try:
+        pulses_extracted = inputs['pulses_extracted']
+        pulse_positions_samples = inputs['pulse_positions_samples']
+        pris_us = inputs['pris_us']
+        sample_rate_hz = inputs['sample_rate_hz']
+        num_pulses = inputs['num_pulses']
+        extraction_window_samples = inputs['extraction_window_samples']
+        window_type = inputs['window_type']
+        nufft_kernel = inputs.get('nufft_kernel', 'direct')
         
-        # Apply windowing and compute FFT for each range bin
-        range_doppler = np.zeros((num_doppler_bins, num_range_bins), dtype=complex)
+        # Debug check
+        if num_pulses < 2:
+            return {
+                'range_doppler': np.array([[]]),
+                'range_doppler_db': np.array([[]]),
+                'doppler_freqs_hz': np.array([]),
+                'doppler_resolution_hz': 0,
+                'num_range_bins': 0,
+                'pulse_times_relative_s': np.array([]),
+                'nyquist_doppler': 0,
+                'min_prf': 0,
+                'is_uniform_prf': False
+            }
         
-        for range_bin in range(num_range_bins):
-            # Get signal across all pulses for this range bin
-            signal = pulses_trimmed[:, range_bin] * slow_time_window
-            
-            # Apply FFT and fftshift to center zero frequency
-            fft_result = np.fft.fft(signal)
-            range_doppler[:, range_bin] = np.fft.fftshift(fft_result)
+        # Use the actual pulse positions (in samples) from PRI-based extraction
+        pulse_times_s = pulse_positions_samples / sample_rate_hz
+        pulse_times_relative_s = pulse_times_s - pulse_times_s[0]
+        t_span = pulse_times_relative_s[-1]
         
-        # Update frequency grid for uniform sampling
-        doppler_freqs_hz = np.fft.fftshift(np.fft.fftfreq(num_pulses, 1.0 / avg_prf))
-        doppler_resolution_hz = avg_prf / num_pulses
+        # Apply window function across slow time (Doppler dimension)
+        slow_time_window = _make_window(num_pulses, window_type)
         
-    else:
-        # Non-uniform PRF - use NUFFT with selected kernel
-        range_doppler = np.zeros((num_doppler_bins, num_range_bins), dtype=complex)
+        # Compute Doppler parameters
+        max_pri_s = np.max(pris_us) / 1e6 if num_pulses > 1 else 1.0
+        min_prf = 1.0 / max_pri_s
+        nyquist_doppler = min_prf / 2.0
+        doppler_resolution_hz = 1.0 / t_span if t_span > 0 else 1.0
+        num_doppler_bins = num_pulses
+        doppler_freqs_hz = np.linspace(-nyquist_doppler, nyquist_doppler, num_doppler_bins)
         
-        if nufft_kernel == 'direct':
-            # Direct NUFFT computation: F[k] = sum_j c_j * exp(-2πi * f_k * t_j)
-            # Normalize by sqrt(N) for proper energy scaling
-            normalization = 1.0 / np.sqrt(num_pulses)
-            for range_bin in range(num_range_bins):
-                # Get signal across all pulses for this range bin (apply slow-time window here)
-                signal = pulses_trimmed[:, range_bin] * slow_time_window
-                
-                # Direct computation: F[k] = sum_j signal[j] * exp(-2πi * freq[k]* time[j])
-                for k, freq in enumerate(doppler_freqs_hz):
-                    range_doppler[k, range_bin] = normalization * np.sum(signal * np.exp(-2j * np.pi * freq * pulse_times_relative_s))
+        # Use up to 10000 range bins
+        max_range_bins = min(10000, extraction_window_samples)
+        pulses_trimmed = pulses_extracted[:, :max_range_bins]
+        num_range_bins = pulses_trimmed.shape[1]
         
-        elif nufft_kernel == 'kaiser_bessel':
-            # Kaiser-Bessel gridding approximation (faster but approximate)
-            # Oversample factor for better accuracy
-            oversample = 2
-            grid_size = num_doppler_bins * oversample
-            
-            # Create uniform grid
-            grid_times = np.linspace(0, t_span, grid_size)
-            dt_grid = t_span / (grid_size - 1) if grid_size > 1 else 1.0
-            
-            # Kaiser-Bessel parameters
-            beta = 8.0  # Shape parameter
-            width = 4  # Kernel width in grid points
+        # Check if PRF is uniform
+        pri_variation = np.std(pris_us) / np.mean(pris_us) if len(pris_us) > 0 else 0
+        is_uniform_prf = pri_variation < 0.01
+        
+        if is_uniform_prf and num_pulses > 1:
+            # Use regular FFT for uniform PRF
+            avg_prf = 1e6 / np.mean(pris_us)
+            nyquist_doppler = avg_prf / 2.0
+            range_doppler = np.zeros((num_doppler_bins, num_range_bins), dtype=complex)
             
             for range_bin in range(num_range_bins):
                 signal = pulses_trimmed[:, range_bin] * slow_time_window
-                
-                # Grid the non-uniform data using Kaiser-Bessel kernel
-                grid_data = np.zeros(grid_size, dtype=complex)
-                for j, t_j in enumerate(pulse_times_relative_s):
-                    # Find nearest grid point
-                    grid_idx = int(t_j / dt_grid)
-                    
-                    # Spread onto nearby grid points using Kaiser-Bessel kernel
-                    for offset in range(-width, width + 1):
-                        idx = grid_idx + offset
-                        if 0 <= idx < grid_size:
-                            distance = abs(t_j - grid_times[idx]) / dt_grid
-                            if distance <= width:
-                                # Kaiser-Bessel kernel
-                                from scipy.special import i0
-                                arg = beta * np.sqrt(1 - (distance / width)**2)
-                                kernel_val = i0(arg) / i0(beta)
-                                grid_data[idx] += signal[j] * kernel_val
-                
-                # FFT the gridded data
-                fft_result = np.fft.fft(grid_data)
-                fft_result = np.fft.fftshift(fft_result)
-                
-                # Resample to desired frequency grid
-                from scipy.interpolate import interp1d
-                fft_freqs = np.fft.fftshift(np.fft.fftfreq(grid_size, dt_grid))
-                interp_func = interp1d(fft_freqs, fft_result, kind='linear', bounds_error=False, fill_value=0)
-                range_doppler[:, range_bin] = interp_func(doppler_freqs_hz)
-        
-        elif nufft_kernel == 'gaussian':
-            # Gaussian gridding approximation
-            oversample = 2
-            grid_size = num_doppler_bins * oversample
+                fft_result = np.fft.fft(signal)
+                range_doppler[:, range_bin] = np.fft.fftshift(fft_result)
             
-            grid_times = np.linspace(0, t_span, grid_size)
-            dt_grid = t_span / (grid_size - 1) if grid_size > 1 else 1.0
-            
-            # Gaussian parameters
-            sigma = 1.5  # Width parameter
-            truncate = 3.0  # Truncate at 3 sigma
-            
-            for range_bin in range(num_range_bins):
-                signal = pulses_trimmed[:, range_bin] * slow_time_window
-                
-                # Grid using Gaussian kernel
-                grid_data = np.zeros(grid_size, dtype=complex)
-                for j, t_j in enumerate(pulse_times_relative_s):
-                    grid_idx = int(t_j / dt_grid)
-                    width = int(truncate * sigma)
-                    
-                    for offset in range(-width, width + 1):
-                        idx = grid_idx + offset
-                        if 0 <= idx < grid_size:
-                            distance = (t_j - grid_times[idx]) / dt_grid
-                            kernel_val = np.exp(-distance**2 / (2 * sigma**2))
-                            grid_data[idx] += signal[j] * kernel_val
-                
-                # FFT and resample
-                fft_result = np.fft.fftshift(np.fft.fft(grid_data))
-                fft_freqs = np.fft.fftshift(np.fft.fftfreq(grid_size, dt_grid))
-                
-                from scipy.interpolate import interp1d
-                interp_func = interp1d(fft_freqs, fft_result, kind='linear', bounds_error=False, fill_value=0)
-                range_doppler[:, range_bin] = interp_func(doppler_freqs_hz)
-        
+            doppler_freqs_hz = np.fft.fftshift(np.fft.fftfreq(num_pulses, 1.0 / avg_prf))
+            doppler_resolution_hz = avg_prf / num_pulses
         else:
-            # Fall back to direct if unknown kernel
+            # Use direct NUFFT for non-uniform PRF
+            range_doppler = np.zeros((num_doppler_bins, num_range_bins), dtype=complex)
             normalization = 1.0 / np.sqrt(num_pulses)
+            
             for range_bin in range(num_range_bins):
                 signal = pulses_trimmed[:, range_bin] * slow_time_window
                 for k, freq in enumerate(doppler_freqs_hz):
                     range_doppler[k, range_bin] = normalization * np.sum(signal * np.exp(-2j * np.pi * freq * pulse_times_relative_s))
+        
+        # Convert to dB
+        range_doppler_db = 10 * np.log10(np.abs(range_doppler) ** 2 + 1e-12)
+        
+        return {
+            'range_doppler': range_doppler,
+            'range_doppler_db': range_doppler_db,
+            'doppler_freqs_hz': doppler_freqs_hz,
+            'doppler_resolution_hz': doppler_resolution_hz,
+            'num_range_bins': num_range_bins,
+            'pulse_times_relative_s': pulse_times_relative_s,
+            'nyquist_doppler': nyquist_doppler,
+            'min_prf': min_prf,
+            'is_uniform_prf': is_uniform_prf
+        }
     
-    # Convert to dB
-    range_doppler_db = 10 * np.log10(np.abs(range_doppler) ** 2 + 1e-12)
-    
-    return {
-        'range_doppler': range_doppler,
-        'range_doppler_db': range_doppler_db,
-        'doppler_freqs_hz': doppler_freqs_hz,
-        'doppler_resolution_hz': doppler_resolution_hz,
-        'num_range_bins': num_range_bins,
-        'pulse_times_relative_s': pulse_times_relative_s,
-        'nyquist_doppler': nyquist_doppler,
-        'min_prf': min_prf,
-        'is_uniform_prf': is_uniform_prf
-    }
+    except Exception as e:
+        import traceback
+        return {
+            'range_doppler': np.array([[]]),
+            'range_doppler_db': np.array([[]]),
+            'doppler_freqs_hz': np.array([]),
+            'doppler_resolution_hz': 0,
+            'num_range_bins': 0,
+            'pulse_times_relative_s': np.array([]),
+            'nyquist_doppler': 0,
+            'min_prf': 0,
+            'is_uniform_prf': False
+        }
+
+
 
 
 # ============================================================================
@@ -594,7 +539,7 @@ def run_workflow(signal_data, metadata=None, **kwargs):
     
     tx_wfm = metadata.get('tx_wfm')
     if tx_wfm is None:
-        workflow.add_text("No TX waveform found in CRSD file. Cannot perform matched filtering.")
+        workflow.add_text("❌ **Error:** TX waveform is required for Range-Doppler Processing workflow. Please select or provide a TX CRSD file.")
         return workflow.build()
     
     # Create and execute graph
@@ -604,18 +549,32 @@ def run_workflow(signal_data, metadata=None, **kwargs):
         dag = graph.build()
         result = dag.execute(True, 4)
         
-        # Extract context
-        if hasattr(result, 'context'):
+        # Extract context - try multiple methods
+        context = None
+        if isinstance(result, dict):
+            context = result
+        elif hasattr(result, 'context'):
             context = result.context
         elif hasattr(result, 'results'):
             context = result.results
         else:
-            context = result
+            context = dict(result) if hasattr(result, '__dict__') else {}
+        
+        # Ensure context is a dict
+        if not isinstance(context, dict):
+            context = {}
             
     except Exception as e:
         import traceback
-        traceback.print_exc()
-        workflow.add_text(f"Error executing graph: {str(e)}")
+        error_msg = f"Error executing graph: {str(e)}"
+        workflow.add_text(error_msg)
+        workflow.add_text("Stack trace:")
+        workflow.add_code(traceback.format_exc())
+        return workflow.build()
+    
+    # Check if context is empty
+    if not context or not any(k for k in context.keys() if not k.startswith('_')):
+        workflow.add_text("Warning: Graph execution returned empty results. Check input data and parameters.")
         return workflow.build()
     
     # Format and return results
@@ -681,7 +640,7 @@ def _create_graph(signal_data, metadata):
         ]
     )
     
-    # Matched filter
+    # Always use matched filter with TX waveform
     graph.add(
         node_matched_filter,
         label="Matched Filter",
@@ -774,16 +733,34 @@ def _create_graph(signal_data, metadata):
         ]
     )
     
+    # Filter pulses by PRF bounds
+    graph.add(
+        node_filter_pulses_by_prf_bounds,
+        label="Filter Pulses by PRF Bounds",
+        inputs=[
+            ('detected_min_prf_hz', 'detected_min_prf_hz'),
+            ('detected_max_prf_hz', 'detected_max_prf_hz'),
+            ('pulse_positions_samples', 'pulse_positions_samples'),
+            ('pris_us', 'pris_us'),
+            ('num_pulses', 'num_pulses')
+        ],
+        outputs=[
+            ('pulse_positions_samples', 'pulse_positions_samples_filtered'),
+            ('pris_us', 'pris_us_filtered'),
+            ('num_pulses', 'num_pulses_filtered')
+        ]
+    )
+    
     # PRI-based extraction
     graph.add(
         node_pri_based_extraction,
         label="PRI-Based Extraction",
         inputs=[
             ('mf_output', 'mf_output'),
-            ('pulse_positions_samples', 'pulse_positions_samples'),
-            ('pris_us', 'pris_us'),
+            ('pulse_positions_samples_filtered', 'pulse_positions_samples'),
+            ('pris_us_filtered', 'pris_us'),
             ('sample_rate_hz', 'sample_rate_hz'),
-            ('num_pulses', 'num_pulses'),
+            ('num_pulses_filtered', 'num_pulses'),
             ('shortest_pri_samples', 'shortest_pri_samples')
         ],
         outputs=[
@@ -799,10 +776,10 @@ def _create_graph(signal_data, metadata):
         label="NUFFT Doppler",
         inputs=[
             ('pulses_extracted', 'pulses_extracted'),
-            ('pulse_positions_samples', 'pulse_positions_samples'),
-            ('pris_us', 'pris_us'),
+            ('pulse_positions_samples_filtered', 'pulse_positions_samples'),
+            ('pris_us_filtered', 'pris_us'),
             ('sample_rate_hz', 'sample_rate_hz'),
-            ('num_pulses', 'num_pulses'),
+            ('num_pulses_filtered', 'num_pulses'),
             ('extraction_window_samples', 'extraction_window_samples'),
             ('window_type', 'window_type'),
             ('nufft_kernel', 'nufft_kernel')
@@ -830,6 +807,19 @@ def _format_results(context, metadata):
             results[output_name] = value
         else:
             results[key] = value
+    
+    # Debug output - show ALL keys
+    result_keys = sorted(str(k) for k in results.keys())
+    
+    workflow.add_text(f"**Filter Type:** Matched Filter (TX waveform)")
+    
+    # Check for NUFFT errors
+    if 'nufft_error' in results:
+        workflow.add_text(f"⚠️ **NUFFT Doppler Error:** {results['nufft_error']}")
+        if 'nufft_traceback' in results:
+            workflow.add_text(f"Traceback: {results['nufft_traceback']}")
+    
+    workflow.add_text(f"**Debug:** Graph returned {len(result_keys)} result keys")
     
     # Build summary table
     sample_rate_hz = float(metadata.get('sample_rate_hz', 100e6))
@@ -1087,7 +1077,11 @@ def _add_plots(results, metadata):
             workflow.add_plot(fig_phase)
     
     # Plot 4: PRI plot (only for pulsed data)
-    pris_us = results.get('pris_us')
+    pris_us = results.get('pris_us')  # Original (pre-filtered) for clustering display
+    pris_us_to_plot = results.get('pris_us_filtered')
+    if pris_us_to_plot is None:
+        # Fallback to unfiltered if filtering didn't happen
+        pris_us_to_plot = results.get('pris_us')
     auto_detect_prf = bool(metadata.get('auto_detect_prf', False))
     detected_min_prf_hz = results.get('detected_min_prf_hz', min_prf_hz)
     detected_max_prf_hz = results.get('detected_max_prf_hz', max_prf_hz)
@@ -1096,11 +1090,11 @@ def _add_plots(results, metadata):
     prf_min_display = detected_min_prf_hz if auto_detect_prf else min_prf_hz
     prf_max_display = detected_max_prf_hz if auto_detect_prf else max_prf_hz
     
-    if is_pulsed and pris_us is not None and len(pris_us) > 0:
+    if is_pulsed and pris_us_to_plot is not None and len(pris_us_to_plot) > 0:
         fig3d = go.Figure()
         fig3d.add_trace(go.Scatter(
-            x=np.arange(len(pris_us)),
-            y=pris_us,
+            x=np.arange(len(pris_us_to_plot)),
+            y=pris_us_to_plot,
             mode='markers+lines',
             name='PRI',
             marker=dict(color='cyan', size=4),
@@ -1110,14 +1104,14 @@ def _add_plots(results, metadata):
         min_pri_us = 1e6 / prf_max_display
         max_pri_us = 1e6 / prf_min_display
         fig3d.add_trace(go.Scatter(
-            x=[0, len(pris_us)-1],
+            x=[0, len(pris_us_to_plot)-1],
             y=[min_pri_us, min_pri_us],
             mode='lines',
             name=f'Min PRI ({min_pri_us:.1f} μs, {prf_max_display:.0f} Hz)',
             line=dict(color='yellow', width=1, dash='dash')
         ))
         fig3d.add_trace(go.Scatter(
-            x=[0, len(pris_us)-1],
+            x=[0, len(pris_us_to_plot)-1],
             y=[max_pri_us, max_pri_us],
             mode='lines',
             name=f'Max PRI ({max_pri_us:.1f} μs, {prf_min_display:.0f} Hz)',

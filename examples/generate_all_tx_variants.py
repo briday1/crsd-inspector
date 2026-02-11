@@ -1,10 +1,8 @@
 #!/usr/bin/env python3
 """
-Generate all TX waveform variants for each example:
+Generate TX waveform variants for each example:
 - Single pulse TX, embedded
-- Single pulse TX, external file  
-- Full sequence TX, embedded
-- Full sequence TX, external file
+- Single pulse TX, external file
 """
 
 import sys
@@ -23,13 +21,11 @@ import sarkit.crsd as skcrsd
 class TXVariantGenerator(CRSDGenerator):
     """Extended generator that can create all TX waveform variants"""
     
-    def __init__(self, config: SceneConfig, tx_mode: str = "single_embedded"):
+    def __init__(self, config: SceneConfig, tx_mode: str = "embedded"):
         """
         tx_mode: 
-            - "single_embedded": Single pulse TX in same file (current default)
-            - "single_external": Single pulse TX in separate file, placeholder in main
-            - "full_embedded": Full TX sequence in same file
-            - "full_external": Full TX sequence in separate file, placeholder in main
+            - "embedded": Single pulse TX in same file
+            - "external": Single pulse TX in separate file, placeholder in main
         """
         super().__init__(config)
         self.tx_mode = tx_mode
@@ -53,12 +49,6 @@ class TXVariantGenerator(CRSDGenerator):
         # Generate pulse times (needed for full sequence)
         self.pulse_times = self._generate_pulse_times()
         
-        # Create full sequence if needed
-        if "full" in self.tx_mode:
-            full_sequence_tx = self._create_full_tx_sequence(single_pulse_tx)
-        else:
-            full_sequence_tx = None
-        
         # Generate RX signals
         all_channels = []
         for ch_idx in range(self.config.num_channels):
@@ -74,23 +64,13 @@ class TXVariantGenerator(CRSDGenerator):
         if self.config.verbose:
             print("  - Writing CRSD file(s)...")
             
-        if self.tx_mode == "single_embedded":
+        if self.tx_mode == "embedded":
             # Standard: single pulse TX in same file
             file_size = self._write_crsd(all_channels, single_pulse_tx)
             
-        elif self.tx_mode == "single_external":
+        elif self.tx_mode == "external":
             # Write TX file with single pulse
             self._write_tx_file(single_pulse_tx, is_full_sequence=False)
-            # Write main file with placeholder
-            file_size = self._write_crsd(all_channels, np.array([0.0+0.0j], dtype=np.complex64))
-            
-        elif self.tx_mode == "full_embedded":
-            # Full sequence TX in same file
-            file_size = self._write_crsd(all_channels, full_sequence_tx)
-            
-        elif self.tx_mode == "full_external":
-            # Write TX file with full sequence
-            self._write_tx_file(full_sequence_tx, is_full_sequence=True)
             # Write main file with placeholder
             file_size = self._write_crsd(all_channels, np.array([0.0+0.0j], dtype=np.complex64))
         else:
@@ -158,16 +138,28 @@ class TXVariantGenerator(CRSDGenerator):
         total_time = self.pulse_times[-1] + (2.0 / self.config.prf_hz)
         total_samples = int(np.ceil(total_time * fs))
         
-        # Create sequence
+        # Create sequence without the per-pulse window
+        # Generate raw chirp without window for each pulse to avoid amplitude modulation
         full_tx = np.zeros(total_samples, dtype=np.complex64)
+        
+        # Get waveform parameters
+        T = len(single_pulse_tx) / fs
+        bw = self.config.bandwidth_hz
+        k = bw / T
         
         for pulse_time in self.pulse_times:
             pulse_start = int(pulse_time * fs)
             pulse_end = min(pulse_start + len(single_pulse_tx), total_samples)
-            copy_len = pulse_end - pulse_start
+            pulse_len = pulse_end - pulse_start
             
-            if copy_len > 0:
-                full_tx[pulse_start:pulse_end] = single_pulse_tx[:copy_len]
+            if pulse_len > 0:
+                # Generate raw LFM chirp without window for this pulse
+                t = np.arange(pulse_len, dtype=np.float64) / fs
+                phase = np.pi * k * (t - T / 2.0) ** 2
+                pulse = np.exp(1j * phase).astype(np.complex64)
+                # Normalize to match single pulse level
+                pulse /= np.sqrt(np.mean(np.abs(pulse) ** 2) + 1e-12).astype(np.float32)
+                full_tx[pulse_start:pulse_end] = pulse
         
         return full_tx
     
@@ -175,8 +167,7 @@ class TXVariantGenerator(CRSDGenerator):
         """Write separate TX waveform file"""
         # Determine TX filename
         main_path = Path(self.config.output_file)
-        tx_suffix = "_full_tx" if is_full_sequence else "_single_tx"
-        tx_path = main_path.parent / (main_path.stem + tx_suffix + ".crsd")
+        tx_path = main_path.parent / (main_path.stem + "_tx.crsd")
         self.tx_file_path = str(tx_path)
         
         # Create minimal RX channel (placeholder)
@@ -327,10 +318,8 @@ def generate_all_variants():
     
     # TX modes
     tx_modes = [
-        "single_embedded",
-        "single_external",
-        "full_embedded",
-        "full_external",
+        "embedded",
+        "external",
     ]
     
     results = []
@@ -341,7 +330,7 @@ def generate_all_variants():
     print("=" * 80)
     print(f"Examples: {len(examples)}")
     print(f"TX Modes: {len(tx_modes)}")
-    print(f"Total Files: {len(examples) * len(tx_modes)} (+{len(examples)*2} external TX files)")
+    print(f"Total Files: {len(examples) * len(tx_modes)} (+{len(examples)} external TX files)")
     print()
     
     for ex_idx, example in enumerate(examples, 1):
@@ -355,7 +344,7 @@ def generate_all_variants():
             
             # Set output filename
             config = example['config']
-            suffix = f"_{tx_mode.replace('_', '-')}"
+            suffix = f"_{tx_mode}"
             config.output_file = str(base_dir / f"{example['name']}{suffix}.crsd")
             
             try:

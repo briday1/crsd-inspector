@@ -338,10 +338,15 @@ def _format_results(context, metadata):
     amplitude = context.get('amplitude')
     if amplitude is not None:
         # Downsample in range dimension if requested
-        if downsample_factor > 1:
-            amplitude_plot = amplitude[:, ::downsample_factor]
-        else:
-            amplitude_plot = amplitude
+        amplitude_plot = amplitude[:, ::downsample_factor] if downsample_factor > 1 else amplitude
+        
+        # Auto-downsample pulse dimension for very large heatmaps to prevent JSON serialization errors
+        # Target: ~500k data points max in heatmap (to stay under JS string limits)
+        max_heatmap_points = 500000
+        total_points = amplitude_plot.shape[0] * amplitude_plot.shape[1]
+        if total_points > max_heatmap_points:
+            downsample_pulses = int(np.ceil(np.sqrt(total_points / max_heatmap_points)))
+            amplitude_plot = amplitude_plot[::downsample_pulses, :]
         
         amp_db = 20 * np.log10(amplitude_plot + 1e-10)
         
@@ -389,10 +394,15 @@ def _format_results(context, metadata):
     phase = context.get('phase')
     if phase is not None:
         # Downsample in range dimension if requested
-        if downsample_factor > 1:
-            phase_plot = phase[:, ::downsample_factor]
-        else:
-            phase_plot = phase
+        phase_plot = phase[:, ::downsample_factor] if downsample_factor > 1 else phase
+        
+        # Auto-downsample pulse dimension for very large heatmaps to prevent JSON serialization errors
+        # Target: ~500k data points max in heatmap (to stay under JS string limits)
+        max_heatmap_points = 500000
+        total_points = phase_plot.shape[0] * phase_plot.shape[1]
+        if total_points > max_heatmap_points:
+            downsample_pulses = int(np.ceil(np.sqrt(total_points / max_heatmap_points)))
+            phase_plot = phase_plot[::downsample_pulses, :]
         
         phase_min_default = float(np.percentile(phase_plot, 1))
         phase_max_default = float(np.percentile(phase_plot, 99))

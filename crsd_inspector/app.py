@@ -132,6 +132,39 @@ def scan_directory_for_crsd(directory_path):
     return sorted(files)
 
 
+def scan_directory_for_tx_files(directory_path):
+    """Scan a directory for TX CRSD files (_tx.crsd suffix)"""
+    if not directory_path:
+        return []
+    
+    files = []
+    for ext in ['*_tx.crsd', '*_tx.CRSD', '*_tx.nitf', '*_tx.NITF']:
+        files.extend(glob.glob(os.path.join(directory_path, ext)))
+    
+    return sorted(files)
+
+
+def load_tx_waveform(tx_file_path):
+    """Load TX waveform from a CRSD file"""
+    if not tx_file_path or not os.path.isfile(tx_file_path):
+        return None
+    
+    try:
+        with open(tx_file_path, 'rb') as f:
+            reader = crsd.Reader(f)
+            # Try to load TX waveform
+            try:
+                tx_wfm_array = reader.read_support_array("TX_WFM")
+                tx_wfm = np.asarray(tx_wfm_array[0, :], dtype=np.complex64)
+                return tx_wfm
+            except:
+                pass
+    except Exception as e:
+        st.warning(f"Could not load TX waveform from {os.path.basename(tx_file_path)}: {e}")
+    
+    return None
+
+
 def load_and_process_file(file_path):
     """Load raw signal data from CRSD file"""
     # Check cache first
@@ -204,6 +237,16 @@ def load_and_process_file(file_path):
             metadata["sample_rate_hz"] = sample_rate_hz
         if prf_hz:
             metadata["prf_hz"] = prf_hz
+        
+        # Check if companion TX file exists
+        file_dir = os.path.dirname(file_path)
+        file_base = os.path.basename(file_path)
+        # Replace .crsd/.CRSD with _tx.crsd
+        if file_base.lower().endswith('.crsd'):
+            base_without_ext = file_base[:-5]  # Remove .crsd
+            tx_file_candidate = os.path.join(file_dir, f"{base_without_ext}_tx.crsd")
+            if os.path.isfile(tx_file_candidate):
+                metadata["suggested_tx_file"] = tx_file_candidate
         
         result = {
             "channel_data": channel_data,
@@ -377,12 +420,41 @@ if st.session_state.selected_workflow:
                 st.session_state.workflow_params[param_key] = value
                 
             elif param_type == 'text':
-                value = st.sidebar.text_input(
-                    label,
-                    value=str(default) if default is not None else '',
-                    key=f"param_{param_key}"
-                )
-                st.session_state.workflow_params[param_key] = value
+                # Special handling for tx_crsd_file parameter - use file picker
+                if param_key == 'tx_crsd_file' and current_data:
+                    current_file_path = current_data['file_path']
+                    file_dir = os.path.dirname(current_file_path)
+                    
+                    # Discover TX files in same directory
+                    tx_files = scan_directory_for_tx_files(file_dir)
+                    tx_file_options = ['(None)'] + [os.path.basename(f) for f in tx_files]
+                    tx_file_paths = [''] + tx_files
+                    
+                    # Create display map
+                    tx_display_map = {path: name for path, name in zip(tx_file_paths, tx_file_options)}
+                    
+                    # Try to find the companion file
+                    selected_idx = 0
+                    suggested_tx = current_data['metadata'].get('suggested_tx_file', '')
+                    if suggested_tx and suggested_tx in tx_files:
+                        selected_idx = tx_file_paths.index(suggested_tx)
+                    
+                    selected_tx_path = st.sidebar.selectbox(
+                        label,
+                        options=tx_file_paths,
+                        index=selected_idx,
+                        format_func=lambda x: tx_display_map.get(x, x),
+                        key=f"param_{param_key}",
+                        help="Select a TX waveform file from the same directory, or leave as (None)"
+                    )
+                    st.session_state.workflow_params[param_key] = selected_tx_path
+                else:
+                    value = st.sidebar.text_input(
+                        label,
+                        value=str(default) if default is not None else '',
+                        key=f"param_{param_key}"
+                    )
+                    st.session_state.workflow_params[param_key] = value
     
     # Execute button at the end of sidebar
     st.sidebar.markdown("---")
@@ -403,11 +475,20 @@ if st.session_state.selected_workflow:
             if 'workflow_params' in st.session_state:
                 workflow_metadata.update(st.session_state.workflow_params)
             
+            # Check if a TX file was selected and load its waveform
+            tx_wfm_to_use = current_data.get('tx_wfm')
+            tx_file_path = workflow_metadata.get('tx_crsd_file', '').strip()
+            if tx_file_path and os.path.isfile(tx_file_path):
+                tx_wfm_from_file = load_tx_waveform(tx_file_path)
+                if tx_wfm_from_file is not None:
+                    tx_wfm_to_use = tx_wfm_from_file
+                    st.success(f"Loaded TX waveform from: {os.path.basename(tx_file_path)}")
+            
             workflow_results = execute_workflow(
                 st.session_state.selected_workflow['module'],
                 current_data['channel_data'],
                 st.session_state.selected_channel,
-                current_data.get('tx_wfm'),
+                tx_wfm_to_use,
                 workflow_metadata
             )
             
