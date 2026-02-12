@@ -62,17 +62,41 @@ def run_workflow(signal_data, metadata=None, **kwargs):
     # Create and execute graph
     graph = _create_graph(signal_data, metadata)
     dag = graph.build()
-    # Run single-threaded (parallel=False) so progress callbacks work from main thread
-    context = dag.execute(False, 1)
-    
+
+    try:
+        # Run single-threaded (parallel=False) so progress callbacks work from main thread
+        result = dag.execute(False, 1)
+    except Exception as e:
+        import traceback
+        workflow.add_text(f"❌ **Error executing workflow graph:** {str(e)}")
+        workflow.add_text("**Stack trace:**")
+        workflow.add_text(traceback.format_exc())
+        return workflow.build()
+
+    # Normalize execution result to a dict context.
+    if isinstance(result, dict):
+        context = result
+    elif hasattr(result, "context"):
+        context = result.context
+    elif hasattr(result, "results"):
+        context = result.results
+    else:
+        context = dict(result) if hasattr(result, "__dict__") else {}
+
+    if not isinstance(context, dict):
+        context = {}
+
     # Format and return results
     try:
+        if not context:
+            workflow.add_text("⚠️ No workflow outputs were produced.")
+            return workflow.build()
         _format_results(context, metadata)
     except Exception as e:
         import traceback
         workflow.add_text(f"❌ **Error formatting results:** {str(e)}")
         workflow.add_text("**Stack trace:**")
-        workflow.add_code(traceback.format_exc())
+        workflow.add_text(traceback.format_exc())
     return workflow.build()
 
 

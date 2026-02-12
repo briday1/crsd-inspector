@@ -6,13 +6,12 @@ import os
 import sys
 import glob
 import json
+import base64
 import click
 import importlib.util
 import numpy as np
 from pathlib import Path
 from rich.console import Console
-from rich.table import Table
-from rich import box
 
 console = Console()
 CRSD_XML_NS = "http://api.nsgreg.nga.mil/schema/crsd/1.0"
@@ -47,28 +46,182 @@ def discover_workflows():
             module = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(module)
             
-            # Check for required functions/variables
-            if hasattr(module, 'run_workflow') and hasattr(module, 'PARAMS'):
-                # Get workflow metadata
-                if hasattr(module, 'workflow'):
-                    workflow_obj = getattr(module, 'workflow')
-                    workflow_name = workflow_obj.name
-                    workflow_desc = workflow_obj.description
-                else:
-                    workflow_name = getattr(module, 'WORKFLOW_NAME', module_name)
-                    workflow_desc = getattr(module, 'WORKFLOW_DESCRIPTION', '')
-                
-                workflows[module_name] = {
-                    'module': module,
-                    'name': workflow_name,
-                    'description': workflow_desc,
-                    'filepath': filepath,
-                    'params': module.PARAMS
-                }
+            # Check for required workflow entrypoint.
+            if not hasattr(module, 'run_workflow'):
+                continue
+
+            # Support both old PARAMS-style modules and the newer workflow object style.
+            if hasattr(module, 'workflow'):
+                workflow_obj = getattr(module, 'workflow')
+                workflow_name = getattr(workflow_obj, 'name', module_name)
+                workflow_desc = getattr(workflow_obj, 'description', '')
+                workflow_params = getattr(workflow_obj, 'params', {})
+            else:
+                workflow_name = getattr(module, 'WORKFLOW_NAME', module_name)
+                workflow_desc = getattr(module, 'WORKFLOW_DESCRIPTION', '')
+                workflow_params = getattr(module, 'PARAMS', {})
+
+            workflows[module_name] = {
+                'module': module,
+                'name': workflow_name,
+                'description': workflow_desc,
+                'filepath': filepath,
+                'params': workflow_params
+            }
         except Exception as e:
             console.print(f"[yellow]Warning:[/yellow] Failed to load workflow {filename}: {e}")
     
     return workflows
+
+
+def _option_type_from_param_spec(param_spec):
+    """Map workflow param spec to Click type/behavior."""
+    param_type = str(param_spec.get("type", "text")).lower()
+    default = param_spec.get("default")
+
+    if param_type == "dropdown":
+        options = param_spec.get("options", []) or []
+        values = []
+        for opt in options:
+            if isinstance(opt, dict):
+                values.append(str(opt.get("value")))
+            else:
+                values.append(str(opt))
+        if values:
+            return click.Choice(values), False
+        return click.STRING, False
+
+    if param_type == "checkbox":
+        return None, True
+
+    if param_type == "number":
+        if isinstance(default, int) and not isinstance(default, bool):
+            return click.INT, False
+        return click.FLOAT, False
+
+    return click.STRING, False
+
+
+def _build_workflow_command(workflow_id, wf_info):
+    """Build a dynamic Click command for a workflow."""
+    params = [
+        click.Argument(["crsd_file"], type=click.Path(exists=True)),
+        click.Option(["--channel", "-c"], default="0", show_default=True, help="Channel ID to process"),
+        click.Option(["--output", "-o"], default="output", show_default=True, help="Output directory for HTML report"),
+    ]
+
+    for param_name, param_spec in (wf_info.get("params") or {}).items():
+        option_name = f"--{param_name.replace('_', '-')}"
+        opt_type, is_flag = _option_type_from_param_spec(param_spec)
+        help_text = param_spec.get("help") or param_spec.get("label") or ""
+        default = param_spec.get("default")
+
+        if is_flag:
+            params.append(
+                click.Option(
+                    [option_name],
+                    is_flag=True,
+                    default=bool(default),
+                    show_default=True,
+                    help=help_text,
+                )
+            )
+        else:
+            params.append(
+                click.Option(
+                    [option_name],
+                    default=default,
+                    show_default=True,
+                    type=opt_type,
+                    help=help_text,
+                )
+            )
+
+    def _callback(crsd_file, channel, output, **workflow_params):
+        _execute_workflow(workflow_id, crsd_file, channel, output, workflow_params)
+
+    return click.Command(
+        name=workflow_id,
+        help=wf_info.get("description", ""),
+        params=params,
+        callback=_callback,
+    )
+
+
+def _execute_workflow(workflow, crsd_file, channel, output, workflow_params):
+    """Shared workflow execution path used by static and dynamic commands."""
+    workflows = discover_workflows()
+    if workflow not in workflows:
+        console.print(f"[red]Error:[/red] Workflow '{workflow}' not found")
+        console.print(f"\nAvailable workflows: {', '.join(workflows.keys())}")
+        console.print("\nUse 'crsd-inspector list' to see all workflows and their parameters")
+        sys.exit(1)
+
+    wf_info = workflows[workflow]
+    wf_module = wf_info["module"]
+    wf_name = wf_info["name"]
+
+    channel_data, metadata, tx_wfm = load_crsd_file(crsd_file)
+
+    channel_ids = list(channel_data.keys())
+    selected_channel = channel
+
+    # Support index-based channel selection (e.g., --channel 0 => first channel).
+    if selected_channel not in channel_data:
+        if selected_channel == "" and channel_ids:
+            selected_channel = channel_ids[0]
+        elif str(selected_channel).isdigit():
+            idx = int(selected_channel)
+            if 0 <= idx < len(channel_ids):
+                selected_channel = channel_ids[idx]
+
+    if selected_channel not in channel_data:
+        console.print(f"[red]Error:[/red] Channel '{channel}' not found")
+        console.print(f"Available channels: {channel_ids}")
+        sys.exit(1)
+
+    signal_data = channel_data[selected_channel]
+
+    if tx_wfm is not None:
+        metadata["tx_wfm"] = tx_wfm
+
+    metadata["channel_data"] = channel_data
+    metadata["selected_channel"] = selected_channel
+    metadata.update(workflow_params or {})
+
+    print(f"\nRunning workflow: {wf_name}")
+    print(f"Channel: {selected_channel}")
+
+    try:
+        results = wf_module.run_workflow(signal_data=signal_data, metadata=metadata)
+        html_path = generate_static_html(results, output, wf_name)
+        console.print(f"\n[bold green]✓ Workflow completed successfully[/bold green]")
+        console.print(f"\nOpen in browser: file://{html_path.absolute()}")
+    except Exception as e:
+        console.print(f"\n[red]Error executing workflow:[/red] {e}")
+        import traceback
+        console.print(traceback.format_exc())
+        sys.exit(1)
+
+
+class WorkflowAwareGroup(click.Group):
+    """Click group that exposes workflows as top-level subcommands."""
+
+    def get_command(self, ctx, cmd_name):
+        command = super().get_command(ctx, cmd_name)
+        if command is not None:
+            return command
+
+        workflows = discover_workflows()
+        wf_info = workflows.get(cmd_name)
+        if wf_info is None:
+            return None
+        return _build_workflow_command(cmd_name, wf_info)
+
+    def list_commands(self, ctx):
+        base_commands = super().list_commands(ctx)
+        workflow_commands = sorted(discover_workflows().keys())
+        return sorted(set(base_commands + workflow_commands))
 
 
 def load_crsd_file(filepath):
@@ -149,7 +302,37 @@ def load_crsd_file(filepath):
 def generate_static_html(results, output_dir, workflow_name):
     """Generate a standalone static HTML report from workflow results"""
     from datetime import datetime
-    import plotly.io as pio
+    from plotly.offline import get_plotlyjs_version
+
+    def _to_builtin_json(value):
+        """Convert Plotly/numpy payloads to plain JSON-serializable Python types."""
+        if isinstance(value, dict) and "dtype" in value and "bdata" in value:
+            try:
+                arr = np.frombuffer(
+                    base64.b64decode(value["bdata"]),
+                    dtype=np.dtype(value["dtype"]),
+                )
+                shape = value.get("shape")
+                if shape:
+                    if isinstance(shape, str):
+                        dims = tuple(int(part.strip()) for part in shape.split(",") if part.strip())
+                        if dims:
+                            arr = arr.reshape(dims)
+                    elif isinstance(shape, (list, tuple)):
+                        arr = arr.reshape(tuple(int(dim) for dim in shape))
+                return arr.tolist()
+            except Exception:
+                # Fall back to recursive conversion for malformed payloads.
+                pass
+        if isinstance(value, dict):
+            return {k: _to_builtin_json(v) for k, v in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [_to_builtin_json(v) for v in value]
+        if isinstance(value, np.ndarray):
+            return value.tolist()
+        if isinstance(value, np.generic):
+            return value.item()
+        return value
     
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -161,7 +344,7 @@ def generate_static_html(results, output_dir, workflow_name):
         "<head>",
         f"    <title>{workflow_name} - CRSD Inspector</title>",
         "    <meta charset='utf-8'>",
-        "    <script src='https://cdn.plot.ly/plotly-2.27.0.min.js'></script>",
+        f"    <script src='https://cdn.plot.ly/plotly-{get_plotlyjs_version()}.min.js'></script>",
         "    <style>",
         "        body {",
         "            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;",
@@ -295,10 +478,8 @@ def generate_static_html(results, output_dir, workflow_name):
             if figure is not None:
                 plot_counter += 1
                 div_id = f"plot-{plot_counter}"
-                
-                # Convert figure to JSON
-                plot_json = pio.to_json(figure)
-                
+                plot_payload = _to_builtin_json(figure.to_plotly_json())
+                plot_json = json.dumps(plot_payload)
                 html_parts.append("    <div class='section'>")
                 html_parts.append("        <div class='plot-container'>")
                 html_parts.append(f"            <div id='{div_id}'></div>")
@@ -327,7 +508,7 @@ def generate_static_html(results, output_dir, workflow_name):
     return html_path
 
 
-@click.group()
+@click.group(cls=WorkflowAwareGroup)
 @click.version_option(version="0.1.0", prog_name="crsd-inspector")
 def cli():
     """
@@ -336,124 +517,6 @@ def cli():
     Process CRSD files with various workflows and generate static HTML reports.
     """
     pass
-
-
-@cli.command()
-def list():
-    """List available workflows and their parameters"""
-    workflows = discover_workflows()
-    
-    if not workflows:
-        console.print("[yellow]No workflows found[/yellow]")
-        return
-    
-    console.print(f"\n[bold cyan]Available Workflows ({len(workflows)}):[/bold cyan]\n")
-    
-    for module_name, wf_info in workflows.items():
-        console.print(f"[bold]{module_name}[/bold]")
-        console.print(f"  Name: {wf_info['name']}")
-        console.print(f"  Description: {wf_info['description']}")
-        
-        # Show parameters
-        params = wf_info['params']
-        if params:
-            console.print("  Parameters:")
-            for param_name, param_spec in params.items():
-                param_type = param_spec.get('type', 'unknown')
-                default = param_spec.get('default', 'N/A')
-                label = param_spec.get('label', param_name)
-                console.print(f"    --{param_name.replace('_', '-')} ({param_type})")
-                console.print(f"      {label}")
-                console.print(f"      Default: {default}")
-        console.print()
-
-
-@cli.command()
-@click.argument('workflow', type=str)
-@click.argument('crsd_file', type=click.Path(exists=True))
-@click.option('--channel', '-c', default='0', help='Channel ID to process')
-@click.option('--output', '-o', default='output', help='Output directory for HTML report')
-@click.option('--params', '-p', help='JSON string or file path with workflow parameters')
-def run(workflow, crsd_file, channel, output, params):
-    """
-    Run a workflow on a CRSD file and generate static HTML output
-    
-    \b
-    Example:
-        crsd-inspector run pulse_extraction examples/example_4.crsd --channel 0 --output results/
-        crsd-inspector run pulse_extraction examples/example_4.crsd --params '{"min_prf_hz": 1000, "max_prf_hz": 2000}'
-        crsd-inspector run pulse_extraction examples/example_4.crsd --params params.json
-    """
-    
-    # Discover workflows
-    workflows = discover_workflows()
-    
-    if workflow not in workflows:
-        console.print(f"[red]Error:[/red] Workflow '{workflow}' not found")
-        console.print(f"\nAvailable workflows: {', '.join(workflows.keys())}")
-        console.print("\nUse 'crsd-inspector list' to see all workflows and their parameters")
-        sys.exit(1)
-    
-    wf_info = workflows[workflow]
-    wf_module = wf_info['module']
-    wf_name = wf_info['name']
-    
-    # Parse parameters
-    workflow_params = {}
-    if params:
-        try:
-            # Check if it's a file path
-            if os.path.isfile(params):
-                with open(params, 'r') as f:
-                    workflow_params = json.load(f)
-            else:
-                # Parse as JSON string
-                workflow_params = json.loads(params)
-        except Exception as e:
-            console.print(f"[red]Error parsing parameters:[/red] {e}")
-            sys.exit(1)
-    
-    # Load CRSD file
-    channel_data, metadata, tx_wfm = load_crsd_file(crsd_file)
-    
-    # Validate channel
-    if channel not in channel_data:
-        console.print(f"[red]Error:[/red] Channel '{channel}' not found")
-        console.print(f"Available channels: {[k for k in channel_data.keys()]}")
-        sys.exit(1)
-    
-    signal_data = channel_data[channel]
-    
-    # Add TX waveform to metadata
-    if tx_wfm is not None:
-        metadata['tx_wfm'] = tx_wfm
-    
-    # Add channel data and selected channel to metadata
-    metadata['channel_data'] = channel_data
-    metadata['selected_channel'] = channel
-    
-    # Merge workflow parameters into metadata
-    metadata.update(workflow_params)
-    
-    # Execute workflow
-    print(f"\nRunning workflow: {wf_name}")
-    print(f"Channel: {channel}")
-    
-    try:
-        results = wf_module.run_workflow(signal_data=signal_data, metadata=metadata)
-        
-        # Generate static HTML
-        html_path = generate_static_html(results, output, wf_name)
-        
-        # Print summary
-        console.print(f"\n[bold green]✓ Workflow completed successfully[/bold green]")
-        console.print(f"\nOpen in browser: file://{html_path.absolute()}")
-        
-    except Exception as e:
-        console.print(f"\n[red]Error executing workflow:[/red] {e}")
-        import traceback
-        console.print(traceback.format_exc())
-        sys.exit(1)
 
 
 def main():
