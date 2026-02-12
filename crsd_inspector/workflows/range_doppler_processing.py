@@ -73,12 +73,6 @@ workflow.params = {
         'type': 'text',
         'default': '1000,1200,1500',
     },
-    'tx_crsd_file': {
-        'label': 'TX CRSD File (required)',
-        'type': 'text',
-        'default': '',
-        'help': 'Path to transmit waveform CRSD file'
-    },
     'nufft_kernel': {
         'label': 'NUFFT Kernel',
         'type': 'dropdown',
@@ -225,6 +219,7 @@ def _create_graph(signal_data, metadata):
             'range_cropping_percentage': range_cropping_percentage,
             'shortest_pri_samples': shortest_pri_samples,
             'total_samples': total_samples,
+            'tx_source': metadata.get('tx_source', 'Unknown'),
             'file_header_kvps': metadata.get('file_header_kvps', {})
         }
         
@@ -254,6 +249,7 @@ def _create_graph(signal_data, metadata):
             ('range_cropping_percentage', 'range_cropping_percentage'),
             ('shortest_pri_samples', 'shortest_pri_samples'),
             ('total_samples', 'total_samples'),
+            ('tx_source', 'tx_source'),
             ('file_header_kvps', 'file_header_kvps')
         ]
     )
@@ -490,6 +486,7 @@ def _create_graph(signal_data, metadata):
             ('auto_detect_prf', 'auto_detect_prf'),
             ('total_samples', 'total_samples'),
             ('shortest_pri_samples', 'shortest_pri_samples'),
+            ('tx_source', 'tx_source'),
             ('detected_min_prf_hz', 'detected_min_prf_hz'),
             ('detected_max_prf_hz', 'detected_max_prf_hz'),
             ('detected_prfs_hz', 'detected_prfs_hz'),

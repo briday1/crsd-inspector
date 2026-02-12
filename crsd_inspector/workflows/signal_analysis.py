@@ -29,12 +29,6 @@ workflow.params = {
         'max': 100000,
         'help': 'Pulse Repetition Frequency for pulse stacking (will use from file if available)'
     },
-    'tx_crsd_file': {
-        'type': 'text',
-        'label': 'TX CRSD File (optional)',
-        'default': '',
-        'help': 'Path to transmit waveform CRSD file (optional, will extract PRF if provided)'
-    },
     'num_pulses_to_stack': {
         'type': 'number',
         'label': 'Number of Pulses to Stack',
@@ -311,4 +305,3 @@ def _format_results(context, metadata):
     iq_stats = context.get('iq_stats')
     if iq_stats:
         workflow.add_table("I/Q Statistics", iq_stats)
-

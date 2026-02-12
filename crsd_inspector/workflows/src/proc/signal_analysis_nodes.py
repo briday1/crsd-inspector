@@ -15,7 +15,7 @@ def extract_prf_from_metadata(metadata):
     Parameters
     ----------
     metadata : dict
-        Workflow metadata containing file_header_kvps and tx_crsd_file
+        Workflow metadata containing file_header_kvps
     
     Returns
     -------
@@ -31,13 +31,6 @@ def extract_prf_from_metadata(metadata):
             prf_hz = float(file_header_kvps['PRF_HZ'])
         except:
             pass
-    
-    # Check if TX file provided
-    tx_crsd_file = metadata.get('tx_crsd_file', '').strip()
-    if tx_crsd_file and prf_hz is None:
-        # Would need to load TX file and extract PRF
-        # For now, just note it's available
-        pass
     
     return prf_hz
 

@@ -20,6 +20,7 @@ def build_processing_summary(inputs):
         - auto_detect_prf: Boolean indicating if auto-detect was enabled
         - total_samples: Total number of samples
         - shortest_pri_samples: Shortest PRI in samples
+        - tx_source: Human-readable TX source description
         - detected_min_prf_hz: Auto-detected minimum PRF (optional)
         - detected_max_prf_hz: Auto-detected maximum PRF (optional)
         - detected_prfs_hz: List of detected PRF values (optional)
@@ -46,6 +47,7 @@ def build_processing_summary(inputs):
     total_time_ms = total_samples / sample_rate_hz * 1000
     shortest_pri_samples = inputs.get('shortest_pri_samples', 1000)
     shortest_pri_us = shortest_pri_samples / sample_rate_hz * 1e6
+    tx_source = inputs.get('tx_source', 'Unknown')
     
     file_header_kvps = inputs.get('file_header_kvps', {})
     
@@ -59,6 +61,7 @@ def build_processing_summary(inputs):
         ["Sample Rate", f"{sample_rate_hz/1e6:.1f} MHz"],
         ["Total Duration", f"{total_time_ms:.2f} ms"],
         ["Range Window", window_type],
+        ["TX Source", tx_source],
     ]
     
     if auto_detect_prf and detected_prfs_hz is not None:
