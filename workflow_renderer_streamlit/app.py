@@ -458,7 +458,12 @@ def main():
     parser = argparse.ArgumentParser(description="Generic Streamlit workflow renderer")
     parser.add_argument("--target-package", default="crsd_inspector")
     args = parser.parse_args()
-    os.environ["WORKFLOW_TARGET_PACKAGE"] = args.target_package
+    launch_streamlit_renderer(args.target_package)
+
+
+def launch_streamlit_renderer(target_package: str):
+    """Launch the generic Streamlit renderer for a specific provider package."""
+    os.environ["WORKFLOW_TARGET_PACKAGE"] = target_package
 
     import streamlit.web.cli as stcli
 

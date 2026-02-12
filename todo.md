@@ -1,1 +1,4 @@
-- [ ] Allow for easy install on offline (air gapped machine)
+- [ ] Put workflow_renderer in it's own repo
+- [ ] Have different types of modules (Streamlit, Staticdash, CLI)
+- [ ] Repos that are functional will just collect workflows and then be able to plug into the workflow thingy
+- [ ] Names: Workflow-ify, flownamic, flowdoctor, flowviz

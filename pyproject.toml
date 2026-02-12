@@ -52,7 +52,7 @@ generator = [
 
 [project.scripts]
 crsd-inspector = "crsd_inspector.cli:main"
-crsd-inspector-gui = "crsd_inspector.app:main"
+crsd-inspector-gui = "crsd_inspector.gui:main"
 crsd-generate = "crsd_generator.cli:cli"
 workflow-renderer-streamlit = "workflow_renderer_streamlit.app:main"
 
