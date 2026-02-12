@@ -89,6 +89,22 @@ workflow.params = {
             {'label': 'Gaussian (Approx, Fast)', 'value': 'gaussian'},
         ]
     },
+    'pulses_to_integrate': {
+        'label': 'Pulses to Integrate (0 = all)',
+        'type': 'number',
+        'default': 0,
+        'min': 0,
+        'max': 100,
+        'step': 1,
+    },
+    'range_cropping_percentage': {
+        'label': 'Range Cropping Percentage',
+        'type': 'number',
+        'default': 0,
+        'min': 0,
+        'max': 100,
+        'step': 1,
+    },
 }
 
 
@@ -177,6 +193,8 @@ def _create_graph(signal_data, metadata):
     use_fixed_prfs = bool(metadata.get('use_fixed_prfs', False))
     fixed_prfs_hz = str(metadata.get('fixed_prfs_hz', '1000,1200,1500'))
     nufft_kernel = metadata.get('nufft_kernel', 'direct')
+    pulses_to_integrate = int(float(metadata.get('pulses_to_integrate', 0)))
+    range_cropping_percentage = float(metadata.get('range_cropping_percentage', 0))
     tx_wfm = metadata.get('tx_wfm')
     
     if signal_data.ndim == 1:
@@ -203,6 +221,8 @@ def _create_graph(signal_data, metadata):
             'use_fixed_prfs': use_fixed_prfs,
             'fixed_prfs_hz': fixed_prfs_hz,
             'nufft_kernel': nufft_kernel,
+            'pulses_to_integrate': pulses_to_integrate,
+            'range_cropping_percentage': range_cropping_percentage,
             'shortest_pri_samples': shortest_pri_samples,
             'total_samples': total_samples,
             'file_header_kvps': metadata.get('file_header_kvps', {})
@@ -230,6 +250,8 @@ def _create_graph(signal_data, metadata):
             ('use_fixed_prfs', 'use_fixed_prfs'),
             ('fixed_prfs_hz', 'fixed_prfs_hz'),
             ('nufft_kernel', 'nufft_kernel'),
+            ('pulses_to_integrate', 'pulses_to_integrate'),
+            ('range_cropping_percentage', 'range_cropping_percentage'),
             ('shortest_pri_samples', 'shortest_pri_samples'),
             ('total_samples', 'total_samples'),
             ('file_header_kvps', 'file_header_kvps')
@@ -428,7 +450,9 @@ def _create_graph(signal_data, metadata):
             ('num_pulses_filtered', 'num_pulses'),
             ('extraction_window_samples', 'extraction_window_samples'),
             ('window_type', 'window_type'),
-            ('nufft_kernel', 'nufft_kernel')
+            ('nufft_kernel', 'nufft_kernel'),
+            ('pulses_to_integrate', 'pulses_to_integrate'),
+            ('range_cropping_percentage', 'range_cropping_percentage')
         ],
         outputs=[
             ('range_doppler', 'range_doppler'),
@@ -664,4 +688,3 @@ def _format_results(context, metadata):
         for key, err in node_errors.items():
             workflow.add_text(f"- {err}")
         workflow.add_text("**Note:** Errors in processing nodes will cause downstream plots to be missing.")
-

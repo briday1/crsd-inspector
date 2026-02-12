@@ -286,9 +286,14 @@ def pri_based_extraction(inputs):
     num_pulses = inputs['num_pulses']
     shortest_pri_samples = inputs['shortest_pri_samples']
     
-    # After alignment, extract only what's needed for the pulse itself
-    # Use ~20% of shortest PRI (much smaller than the full PRI period)
-    extraction_window_samples = max(int(shortest_pri_samples * 0.2), 100)
+    # Set extraction window to the longest selected PRI.
+    # This keeps each extracted pulse long enough for the slowest pulse spacing.
+    if pris_us is not None and len(pris_us) > 0:
+        longest_pri_us = float(np.max(pris_us))
+        extraction_window_samples = max(1, int(np.ceil(longest_pri_us * sample_rate_hz / 1e6)))
+    else:
+        # Fallback when PRI estimates are unavailable
+        extraction_window_samples = max(1, int(shortest_pri_samples))
     
     # Extract pulses from MF output at the computed positions
     pulses_extracted = np.zeros((num_pulses, extraction_window_samples), dtype=complex)
@@ -325,6 +330,8 @@ def nufft_doppler(inputs, make_window_fn):
         extraction_window_samples = inputs['extraction_window_samples']
         window_type = inputs['window_type']
         nufft_kernel = inputs.get('nufft_kernel', 'direct')
+        pulses_to_integrate = int(inputs.get('pulses_to_integrate', 0))
+        range_cropping_percentage = float(inputs.get('range_cropping_percentage', 0))
         
         # Debug check
         if num_pulses < 2:
@@ -340,6 +347,16 @@ def nufft_doppler(inputs, make_window_fn):
                 'is_uniform_prf': False
             }
         
+        # Optionally limit number of pulses used in Doppler integration.
+        # 0 means use all available pulses.
+        if pulses_to_integrate > 0:
+            pulses_to_use = min(num_pulses, pulses_to_integrate)
+            pulse_positions_samples = pulse_positions_samples[:pulses_to_use]
+            pulses_extracted = pulses_extracted[:pulses_to_use, :]
+            if pris_us is not None and len(pris_us) > 0:
+                pris_us = pris_us[:max(1, pulses_to_use - 1)]
+            num_pulses = pulses_to_use
+
         # Use the actual pulse positions (in samples) from PRI-based extraction
         pulse_times_s = pulse_positions_samples / sample_rate_hz
         pulse_times_relative_s = pulse_times_s - pulse_times_s[0]
@@ -356,8 +373,14 @@ def nufft_doppler(inputs, make_window_fn):
         num_doppler_bins = num_pulses
         doppler_freqs_hz = np.linspace(-nyquist_doppler, nyquist_doppler, num_doppler_bins)
         
-        # Use up to 10000 range bins
-        max_range_bins = min(10000, extraction_window_samples)
+        # Optional range cropping for faster computation / focused map.
+        # 0% means no crop, 100% keeps only 1 bin.
+        crop_pct = min(max(range_cropping_percentage, 0.0), 100.0)
+        if crop_pct > 0:
+            keep_fraction = max(0.0, 1.0 - crop_pct / 100.0)
+            max_range_bins = max(1, int(np.ceil(extraction_window_samples * keep_fraction)))
+        else:
+            max_range_bins = extraction_window_samples
         pulses_trimmed = pulses_extracted[:, :max_range_bins]
         num_range_bins = pulses_trimmed.shape[1]
         

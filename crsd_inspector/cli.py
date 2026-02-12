@@ -15,6 +15,12 @@ from rich.table import Table
 from rich import box
 
 console = Console()
+CRSD_XML_NS = "http://api.nsgreg.nga.mil/schema/crsd/1.0"
+
+
+def crsd_tag(local_name):
+    """Build a namespaced CRSD XML tag."""
+    return f"{{{CRSD_XML_NS}}}{local_name}"
 
 
 def discover_workflows():
@@ -83,8 +89,8 @@ def load_crsd_file(filepath):
             
             # Get channel IDs from metadata
             root = reader.metadata.xmltree.getroot()
-            channels = root.findall('.//{http://api.nsgreg.nga.mil/schema/crsd/1.0}Channel')
-            channel_ids = [ch.find('{http://api.nsgreg.nga.mil/schema/crsd/1.0}ChId').text 
+            channels = root.findall(f".//{crsd_tag('Channel')}")
+            channel_ids = [ch.find(crsd_tag('ChId')).text 
                           for ch in channels] if channels else []
             
             # Load ALL channels
@@ -106,9 +112,9 @@ def load_crsd_file(filepath):
             
             # Extract radar parameters from metadata
             try:
-                radar_params = root.find('.//{http://api.nsgreg.nga.mil/schema/crsd/1.0}RadarParameters')
+                radar_params = root.find(f".//{crsd_tag('RadarParameters')}")
                 if radar_params is not None:
-                    sample_rate = radar_params.find('.//{http://api.nsgreg.nga.mil/schema/crsd/1.0}SampleRate')
+                    sample_rate = radar_params.find(f".//{crsd_tag('SampleRate')}")
                     if sample_rate is not None:
                         sample_rate_hz = float(sample_rate.text)
             except:
