@@ -10,7 +10,7 @@ from typing import Any
 
 import numpy as np
 
-from workflow_runtime.contracts import AppSpec, InitializerSpec, ParamSpec, WorkflowSpec
+from renderflow.contracts import AppSpec, InitializerSpec, ParamSpec, WorkflowSpec
 
 CRSD_XML_NS = "http://api.nsgreg.nga.mil/schema/crsd/1.0"
 CRSD_FILE_PATTERNS = ["*.crsd", "*.CRSD", "*.nitf", "*.NITF", "*.ntf", "*.NTF"]
@@ -75,9 +75,33 @@ def _load_tx_waveform(reader, tx_file_path: str | None, tx_channel_id: str | Non
 
 def _scan_directory_for_crsd(directory_path: str) -> list[str]:
     files: list[str] = []
+    if not directory_path or not os.path.isdir(directory_path):
+        return files
     for pattern in CRSD_FILE_PATTERNS:
         files.extend(glob.glob(os.path.join(directory_path, pattern)))
     return sorted(files)
+
+
+def _dropdown_options(values: list[str], include_none: bool = False) -> list[dict[str, Any]]:
+    options: list[dict[str, Any]] = []
+    if include_none:
+        options.append({"label": "(None)", "value": "(None)"})
+    for value in values:
+        options.append({"label": value, "value": value})
+    return options
+
+
+def _discover_channel_ids_from_file(file_path: str) -> list[str]:
+    if not file_path or not os.path.isfile(file_path):
+        return []
+    try:
+        import sarkit.crsd as crsd
+        with open(file_path, "rb") as f:
+            reader = crsd.Reader(f)
+            root = reader.metadata.xmltree.getroot()
+            return _extract_channel_ids(root)
+    except Exception:
+        return []
 
 
 def _resolve_input_crsd_file(params: dict[str, Any]) -> tuple[str, list[str]]:
@@ -287,6 +311,15 @@ def _discover_workflow_specs() -> list[WorkflowSpec]:
 
 def get_app_spec() -> AppSpec:
     """Return CRSD provider definition for generic renderers."""
+    default_rx_dir = "examples"
+    default_tx_dir = "examples"
+    rx_files = [os.path.basename(f) for f in _scan_directory_for_crsd(default_rx_dir)]
+    tx_files = [os.path.basename(f) for f in _scan_directory_for_crsd(default_tx_dir)]
+    default_rx_file_path = os.path.join(default_rx_dir, rx_files[0]) if rx_files else ""
+    default_tx_file_path = os.path.join(default_tx_dir, tx_files[0]) if tx_files else ""
+    rx_channels = _discover_channel_ids_from_file(default_rx_file_path)
+    tx_channels = _discover_channel_ids_from_file(default_tx_file_path)
+
     initializer = InitializerSpec(
         id="crsd_file_initializer",
         name="CRSD File Initializer",
@@ -296,42 +329,46 @@ def get_app_spec() -> AppSpec:
                 key="crsd_directory",
                 label="CRSD Directory",
                 type="text",
-                default="examples",
+                default=default_rx_dir,
                 help="Directory to scan for CRSD/NITF files.",
             ),
             ParamSpec(
                 key="crsd_file",
                 label="CRSD File Name (optional)",
                 type="dropdown",
-                default="",
+                default=rx_files[0] if rx_files else "",
+                options=_dropdown_options(rx_files),
                 help="Basename or substring match within scanned directory. Defaults to first file found.",
             ),
             ParamSpec(
                 key="channel_id",
                 label="Channel ID (optional)",
-                type="text",
-                default="",
+                type="dropdown",
+                default=rx_channels[0] if rx_channels else "",
+                options=_dropdown_options(rx_channels),
                 help="Leave empty to use the first available channel.",
             ),
             ParamSpec(
                 key="tx_crsd_directory",
                 label="TX CRSD Directory (optional)",
                 type="text",
-                default="examples",
+                default=default_tx_dir,
                 help="Directory to scan for optional external TX CRSD files.",
             ),
             ParamSpec(
                 key="tx_crsd_file",
                 label="TX CRSD File (optional)",
                 type="dropdown",
-                default="",
+                default="(None)",
+                options=_dropdown_options(tx_files, include_none=True),
                 help="Optional TX file from the selected TX directory.",
             ),
             ParamSpec(
                 key="tx_channel_id",
                 label="TX Channel ID (optional)",
                 type="dropdown",
-                default="",
+                default=tx_channels[0] if tx_channels else "",
+                options=_dropdown_options(tx_channels),
                 help="Optional TX channel. Defaults to first available in TX file.",
             ),
         ],

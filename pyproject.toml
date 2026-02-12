@@ -25,7 +25,7 @@ classifiers = [
 ]
 
 dependencies = [
-    "streamlit>=1.31.0",
+    "renderflow>=0.1.0",
     "dagex>=2026.1",
     "sarkit>=1.0.0",
     "numpy>=1.24.0",
@@ -45,23 +45,19 @@ dev = [
     "ruff>=0.1.0",
 ]
 
-generator = [
-    "click>=8.0.0",
-    "rich>=13.0.0",
-]
-
 [project.scripts]
 crsd-inspector = "crsd_inspector.cli:main"
 crsd-inspector-gui = "crsd_inspector.gui:main"
-crsd-generate = "crsd_generator.cli:cli"
-workflow-renderer-streamlit = "workflow_renderer_streamlit.app:main"
+
+[project.entry-points."renderflow.providers"]
+crsd-inspector = "crsd_inspector.app_definition:get_app_spec"
 
 [project.urls]
 Homepage = "https://github.com/yourusername/crsd-inspector"
 Repository = "https://github.com/yourusername/crsd-inspector"
 
 [tool.setuptools.packages.find]
-include = ["crsd_inspector*", "crsd_generator*", "workflow_runtime*", "workflow_renderer_streamlit*"]
+include = ["crsd_inspector*"]
 
 [tool.black]
 line-length = 100

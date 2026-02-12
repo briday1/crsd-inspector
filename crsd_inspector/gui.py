@@ -6,14 +6,13 @@ def main():
     Launch the GUI using the generic Streamlit renderer.
 
     CRSD Inspector owns this API while delegating rendering to
-    `workflow_renderer_streamlit`.
+    `renderflow`.
     """
     try:
-        from workflow_renderer_streamlit.app import launch_streamlit_renderer
+        from renderflow.streamlit_renderer import launch_streamlit_renderer
     except Exception as exc:
         raise RuntimeError(
-            "workflow_renderer_streamlit is required for GUI launch."
+            "renderflow is required for GUI launch."
         ) from exc
 
-    launch_streamlit_renderer("crsd_inspector")
-
+    launch_streamlit_renderer("crsd-inspector")
