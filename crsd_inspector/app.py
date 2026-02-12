@@ -2,6 +2,9 @@
 CRSD Inspector - Multi-File Browser
 Streamlit app for CRSD file analysis with workflow-based processing
 """
+import warnings
+warnings.filterwarnings("ignore", message=".*missing ScriptRunContext.*")
+
 import streamlit as st
 import numpy as np
 import pandas as pd
@@ -366,7 +369,14 @@ else:
 if st.session_state.selected_workflow:
     workflow_module = st.session_state.selected_workflow['module']
     
-    if hasattr(workflow_module, 'PARAMS'):
+    # Check if workflow has parameters (either workflow.params or module-level PARAMS for backwards compatibility)
+    params_dict = None
+    if hasattr(workflow_module, 'workflow') and hasattr(workflow_module.workflow, 'params'):
+        params_dict = workflow_module.workflow.params
+    elif hasattr(workflow_module, 'PARAMS'):
+        params_dict = workflow_module.PARAMS
+    
+    if params_dict:
         st.sidebar.markdown("---")
         st.sidebar.subheader("Parameters")
         
@@ -374,7 +384,7 @@ if st.session_state.selected_workflow:
         if 'workflow_params' not in st.session_state:
             st.session_state.workflow_params = {}
         
-        for param_key, param_config in workflow_module.PARAMS.items():
+        for param_key, param_config in params_dict.items():
             label = param_config.get('label', param_key)
             param_type = param_config.get('type', 'text')
             default = param_config.get('default')
@@ -496,6 +506,8 @@ if st.session_state.selected_workflow:
                     )
                 else:
                     html_lines.append(f"<li>{html.escape(line)}</li>")
+            import time as time_module
+            scroll_id = int(time_module.time() * 1000)
             progress_window.markdown(
                 (
                     "<style>"
@@ -507,7 +519,20 @@ if st.session_state.selected_workflow:
                     "border-radius:50%;vertical-align:-0.1rem;animation:rdspin 0.8s linear infinite;}"
                     "@keyframes rdspin{to{transform:rotate(360deg);}}"
                     "</style>"
-                    f"<div class='rd-live-scroll'><ul class='rd-live-list'>{''.join(html_lines)}</ul></div>"
+                    f"<div class='rd-live-scroll' id='rd-progress-panel'><ul class='rd-live-list'>{''.join(html_lines)}</ul></div>"
+                    f"<script id='scroll-{scroll_id}'>"
+                    "(function(){"
+                    "function scrollPanel(){"
+                    "var panel = document.getElementById('rd-progress-panel');"
+                    "if(panel){panel.scrollTop = panel.scrollHeight;}"
+                    "}"
+                    "scrollPanel();"
+                    "requestAnimationFrame(scrollPanel);"
+                    "setTimeout(scrollPanel, 10);"
+                    "setTimeout(scrollPanel, 50);"
+                    "setTimeout(scrollPanel, 100);"
+                    "})();"
+                    "</script>"
                 ),
                 unsafe_allow_html=True
             )

@@ -7,10 +7,20 @@ import numpy as np
 from dagex import Graph
 import plotly.graph_objects as go
 from crsd_inspector.workflows.workflow import Workflow
+from crsd_inspector.workflows.src.proc import signal_analysis_nodes as nodes
+from crsd_inspector.workflows.src.plot import signal_analysis_plots as plots
+from crsd_inspector.workflows.src.summary import signal_analysis_summary as summary
+from crsd_inspector.workflows.src.util.wrappers import safe_plot_wrapper, wrap_with_timing
+
+# Create workflow instance
+workflow = Workflow(
+    name="Signal Analysis",
+    description="Amplitude-based analysis with PRF selection and pulse stacking"
+)
 
 
 # Workflow parameters
-PARAMS = {
+workflow.params = {
     'prf_hz': {
         'type': 'number',
         'label': 'PRF (Hz)',
@@ -46,13 +56,6 @@ PARAMS = {
 }
 
 
-# Create workflow instance
-workflow = Workflow(
-    name="Signal Analysis",
-    description="Amplitude-based analysis with PRF selection and pulse stacking"
-)
-
-
 def run_workflow(signal_data, metadata=None, **kwargs):
     """Run the signal analysis workflow and return formatted results"""
     workflow.clear()  # Clear any previous results
@@ -65,33 +68,18 @@ def run_workflow(signal_data, metadata=None, **kwargs):
     # Create and execute graph
     graph = _create_graph(signal_data, metadata)
     dag = graph.build()
-    context = dag.execute(True, 4)
+    # Run single-threaded (parallel=False) so progress callbacks work from main thread
+    context = dag.execute(False, 1)
     
     # Format and return results
-    _format_results(context, metadata)
+    try:
+        _format_results(context, metadata)
+    except Exception as e:
+        import traceback
+        workflow.add_text(f"❌ **Error formatting results:** {str(e)}")
+        workflow.add_text("**Stack trace:**")
+        workflow.add_code(traceback.format_exc())
     return workflow.build()
-
-
-def _extract_prf_from_metadata(metadata):
-    """Extract PRF from CRSD file metadata if available"""
-    prf_hz = None
-    
-    # Check file header KVPs
-    file_header_kvps = metadata.get('file_header_kvps', {})
-    if 'PRF_HZ' in file_header_kvps:
-        try:
-            prf_hz = float(file_header_kvps['PRF_HZ'])
-        except:
-            pass
-    
-    # Check if TX file provided
-    tx_crsd_file = metadata.get('tx_crsd_file', '').strip()
-    if tx_crsd_file and prf_hz is None:
-        # Would need to load TX file and extract PRF
-        # For now, just note it's available
-        pass
-    
-    return prf_hz
 
 
 def _create_graph(signal_data, metadata):
@@ -102,9 +90,10 @@ def _create_graph(signal_data, metadata):
     prf_hz = float(metadata.get('prf_hz', 1000))
     sample_rate_hz = float(metadata.get('sample_rate_hz', 100e6))
     num_pulses_to_stack = int(metadata.get('num_pulses_to_stack', 100))
+    downsample_factor = int(metadata.get('downsample_range_factor', 1))
     
     # Try to get PRF from metadata first
-    prf_from_file = _extract_prf_from_metadata(metadata)
+    prf_from_file = nodes.extract_prf_from_metadata(metadata)
     if prf_from_file is not None:
         prf_hz = prf_from_file
     
@@ -124,7 +113,8 @@ def _create_graph(signal_data, metadata):
             'sample_rate_hz': sample_rate_hz,
             'pri_samples': pri_samples,
             'num_pulses_to_stack': num_pulses_to_stack,
-            'total_samples': total_samples
+            'total_samples': total_samples,
+            'downsample_factor': downsample_factor
         },
         label="Provide Data",
         inputs=[],
@@ -134,40 +124,19 @@ def _create_graph(signal_data, metadata):
             ('sample_rate_hz', 'sample_rate_hz'),
             ('pri_samples', 'pri_samples'),
             ('num_pulses_to_stack', 'num_pulses_to_stack'),
-            ('total_samples', 'total_samples')
+            ('total_samples', 'total_samples'),
+            ('downsample_factor', 'downsample_factor')
         ]
     )
     
     # Pulse extraction node
-    def extract_pulses(inputs):
-        signal = inputs['signal_data']
-        pri_samples = inputs['pri_samples']
-        num_pulses = inputs['num_pulses_to_stack']
-        total_samples = inputs['total_samples']
-        
-        # Calculate how many pulses we can extract
-        max_pulses = total_samples // pri_samples
-        # If num_pulses is -1, use all available pulses
-        if num_pulses <= 0:
-            actual_num_pulses = max_pulses
-        else:
-            actual_num_pulses = min(num_pulses, max_pulses)
-        
-        # Extract pulses
-        pulses = np.zeros((actual_num_pulses, pri_samples), dtype=signal.dtype)
-        for i in range(actual_num_pulses):
-            start_idx = i * pri_samples
-            end_idx = start_idx + pri_samples
-            if end_idx <= total_samples:
-                pulses[i, :] = signal[0, start_idx:end_idx]
-        
-        return {
-            'pulses': pulses,
-            'actual_num_pulses': actual_num_pulses
-        }
-    
     graph.add(
-        extract_pulses,
+        wrap_with_timing(
+            nodes.extract_pulses,
+            "Extract Pulses",
+            "Extract pulse windows using PRI-based segmentation",
+            metadata
+        ),
         label="Extract Pulses",
         inputs=[
             ('signal_data', 'signal_data'),
@@ -177,88 +146,19 @@ def _create_graph(signal_data, metadata):
         ],
         outputs=[
             ('pulses', 'pulses'),
-            ('actual_num_pulses', 'actual_num_pulses')
+            ('actual_num_pulses', 'actual_num_pulses'),
+            ('_timing', '_timing_Extract Pulses')
         ]
     )
     
     # Compute statistics node
-    def compute_statistics(inputs):
-        pulses = inputs['pulses']
-        
-        amplitude = np.abs(pulses)
-        phase = np.angle(pulses)
-        
-        # Flatten for overall statistics
-        amp_flat = amplitude.flatten()
-        phase_flat = phase.flatten()
-        
-        # Amplitude statistics
-        amplitude_stats = {
-            "Metric": ["Min", "Max", "Mean", "Std Dev", "Median"],
-            "Value": [
-                f"{np.min(amp_flat):.4f}",
-                f"{np.max(amp_flat):.4f}",
-                f"{np.mean(amp_flat):.4f}",
-                f"{np.std(amp_flat):.4f}",
-                f"{np.median(amp_flat):.4f}"
-            ]
-        }
-        
-        # Phase statistics
-        phase_stats = {
-            "Metric": ["Min (rad)", "Max (rad)", "Mean (rad)", "Std Dev (rad)"],
-            "Value": [
-                f"{np.min(phase_flat):.4f}",
-                f"{np.max(phase_flat):.4f}",
-                f"{np.mean(phase_flat):.4f}",
-                f"{np.std(phase_flat):.4f}"
-            ]
-        }
-        
-        # Quality metrics
-        signal_power = np.mean(amp_flat**2)
-        noise_floor = np.percentile(amp_flat, 10)**2
-        snr_db = 10 * np.log10(signal_power / (noise_floor + 1e-10))
-        dynamic_range_db = 20 * np.log10(np.max(amp_flat) / (np.min(amp_flat) + 1e-10))
-        
-        # Clipping detection
-        max_amp = np.max(amp_flat)
-        clipping_threshold = 0.99 * max_amp
-        clipped_samples = np.sum(amp_flat > clipping_threshold)
-        clipping_percentage = 100.0 * clipped_samples / amp_flat.size
-        
-        quality_metrics = {
-            "Metric": ["SNR", "Dynamic Range", "Clipping %", "Total Samples", "Clipped Samples"],
-            "Value": [
-                f"{snr_db:.2f} dB",
-                f"{dynamic_range_db:.2f} dB",
-                f"{clipping_percentage:.2f}%",
-                f"{amp_flat.size}",
-                f"{clipped_samples}"
-            ]
-        }
-        
-        # I/Q statistics
-        iq_stats = {
-            "Component": ["I (Real)", "Q (Imaginary)"],
-            "Mean": [f"{np.mean(pulses.real):.4f}", f"{np.mean(pulses.imag):.4f}"],
-            "Std Dev": [f"{np.std(pulses.real):.4f}", f"{np.std(pulses.imag):.4f}"]
-        }
-        
-        return {
-            'amplitude': amplitude,
-            'phase': phase,
-            'amplitude_stats': amplitude_stats,
-            'phase_stats': phase_stats,
-            'quality_metrics': quality_metrics,
-            'iq_stats': iq_stats,
-            'amp_flat': amp_flat,
-            'phase_flat': phase_flat,
-            'pulses': pulses  # Pass through for PSD calculation
-        }
-    
     graph.add(
-        compute_statistics,
+        wrap_with_timing(
+            nodes.compute_statistics,
+            "Compute Statistics",
+            "Calculate amplitude, phase, and quality metrics",
+            metadata
+        ),
         label="Compute Statistics",
         inputs=[('pulses', 'pulses')],
         outputs=[
@@ -270,7 +170,83 @@ def _create_graph(signal_data, metadata):
             ('iq_stats', 'iq_stats'),
             ('amp_flat', 'amp_flat'),
             ('phase_flat', 'phase_flat'),
-            ('pulses', 'pulses')  # Pass through for PSD
+            ('pulses', 'pulses'),  # Pass through for PSD
+            ('_timing', '_timing_Compute Statistics')
+        ]
+    )
+    
+    # Build analysis parameters summary table
+    graph.add(
+        summary.build_analysis_summary,
+        label="Build Analysis Summary",
+        inputs=[
+            ('prf_hz', 'prf_hz'),
+            ('sample_rate_hz', 'sample_rate_hz'),
+            ('pri_samples', 'pri_samples'),
+            ('actual_num_pulses', 'actual_num_pulses'),
+            ('downsample_factor', 'downsample_factor')
+        ],
+        outputs=[
+            ('params_table', 'params_table')
+        ]
+    )
+    
+    # Plotting nodes
+    graph.add(
+        safe_plot_wrapper(plots.plot_psd, "Plot PSD", ['fig_psd']),
+        label="Plot PSD",
+        inputs=[
+            ('pulses', 'pulses'),
+            ('sample_rate_hz', 'sample_rate_hz')
+        ],
+        outputs=[
+            ('fig_psd', 'fig_psd')
+        ]
+    )
+    
+    graph.add(
+        safe_plot_wrapper(plots.plot_amplitude_heatmap, "Plot Amplitude Heatmap", ['fig_amplitude_heatmap']),
+        label="Plot Amplitude Heatmap",
+        inputs=[
+            ('amplitude', 'amplitude'),
+            ('downsample_factor', 'downsample_factor')
+        ],
+        outputs=[
+            ('fig_amplitude_heatmap', 'fig_amplitude_heatmap')
+        ]
+    )
+    
+    graph.add(
+        safe_plot_wrapper(plots.plot_phase_heatmap, "Plot Phase Heatmap", ['fig_phase_heatmap']),
+        label="Plot Phase Heatmap",
+        inputs=[
+            ('phase', 'phase'),
+            ('downsample_factor', 'downsample_factor')
+        ],
+        outputs=[
+            ('fig_phase_heatmap', 'fig_phase_heatmap')
+        ]
+    )
+    
+    graph.add(
+        safe_plot_wrapper(plots.plot_amplitude_histogram, "Plot Amplitude Histogram", ['fig_amplitude_histogram']),
+        label="Plot Amplitude Histogram",
+        inputs=[
+            ('amp_flat', 'amp_flat')
+        ],
+        outputs=[
+            ('fig_amplitude_histogram', 'fig_amplitude_histogram')
+        ]
+    )
+    
+    graph.add(
+        safe_plot_wrapper(plots.plot_phase_histogram, "Plot Phase Histogram", ['fig_phase_histogram']),
+        label="Plot Phase Histogram",
+        inputs=[
+            ('phase_flat', 'phase_flat')
+        ],
+        outputs=[
+            ('fig_phase_histogram', 'fig_phase_histogram')
         ]
     )
     
@@ -280,204 +256,46 @@ def _create_graph(signal_data, metadata):
 def _format_results(context, metadata):
     """Format workflow results for display"""
     
-    # Get parameters
-    prf_hz = context.get('prf_hz', metadata.get('prf_hz', 1000))
-    sample_rate_hz = context.get('sample_rate_hz', metadata.get('sample_rate_hz', 100e6))
-    actual_num_pulses = context.get('actual_num_pulses', 0)
-    pri_samples = context.get('pri_samples', 0)
-    downsample_factor = int(metadata.get('downsample_range_factor', 1))
+    # Add analysis parameters table (generated by graph node)
+    params_table = context.get('params_table')
+    if params_table:
+        workflow.add_table("Analysis Parameters", params_table)
     
-    # Parameters table
-    params_table = {
-        "Parameter": ["PRF", "Sample Rate", "PRI (samples)", "Pulses Extracted", "Range Downsample"],
-        "Value": [
-            f"{prf_hz:.1f} Hz",
-            f"{sample_rate_hz/1e6:.1f} MHz",
-            f"{pri_samples}",
-            f"{actual_num_pulses}",
-            f"{downsample_factor}x"
-        ]
-    }
-    workflow.add_table("Analysis Parameters", params_table)
+    # Add plots in order (retrieved from graph execution context)
+    plot_names = [
+        'fig_psd',
+        'fig_amplitude_heatmap',
+        'fig_phase_heatmap',
+        'fig_amplitude_histogram',
+        'fig_phase_histogram'
+    ]
     
-    # Power Spectral Density
-    pulses = context.get('pulses')
-    if pulses is not None:
-        # Compute PSD along fast-time (range frequency domain)
-        # Average over pulses for visualization
-        num_pulses, num_range = pulses.shape
-        
-        # Compute FFT along fast-time dimension (range)
-        fft_data = np.fft.fftshift(np.fft.fft(pulses, axis=1), axes=1)
-        psd = np.mean(np.abs(fft_data)**2, axis=0)  # Average over pulses
-        psd_db = 10 * np.log10(psd + 1e-10)
-        
-        # Frequency axis (range frequency bins)
-        range_freqs = np.fft.fftshift(np.fft.fftfreq(num_range, d=1/sample_rate_hz))
-        
-        fig = go.Figure()
-        fig.add_trace(go.Scatter(
-            x=range_freqs / 1e6,  # Convert to MHz
-            y=psd_db,
-            mode='lines',
-            line=dict(color='cyan', width=2),
-            name='PSD'
-        ))
-        
-        fig.update_layout(
-            title="Power Spectral Density (Fast-Time Frequency Domain)",
-            xaxis_title="Frequency (MHz)",
-            yaxis_title="Power (dB)",
-            height=400,
-            template='plotly_dark',
-            showlegend=False
-        )
-        workflow.add_plot(fig)
+    for fig_name in plot_names:
+        fig = context.get(fig_name)
+        if fig is not None:
+            workflow.add_plot(fig)
     
-    # Amplitude heatmap
-    amplitude = context.get('amplitude')
-    if amplitude is not None:
-        # Downsample in range dimension if requested
-        amplitude_plot = amplitude[:, ::downsample_factor] if downsample_factor > 1 else amplitude
-        
-        # Auto-downsample pulse dimension for very large heatmaps to prevent JSON serialization errors
-        # Target: ~500k data points max in heatmap (to stay under JS string limits)
-        max_heatmap_points = 500000
-        total_points = amplitude_plot.shape[0] * amplitude_plot.shape[1]
-        if total_points > max_heatmap_points:
-            downsample_pulses = int(np.ceil(np.sqrt(total_points / max_heatmap_points)))
-            amplitude_plot = amplitude_plot[::downsample_pulses, :]
-        
-        amp_db = 20 * np.log10(amplitude_plot + 1e-10)
-        
-        amp_min_default = float(np.percentile(amp_db, 1))
-        amp_max_default = float(np.percentile(amp_db, 99))
-        
-        fig = go.Figure(data=go.Heatmap(
-            z=amp_db,
-            colorscale='HSV',
-            zmin=amp_min_default,
-            zmax=amp_max_default,
-            colorbar=dict(title="Amplitude (dB)", x=1.15)
-        ))
-        
-        # Add sliders for colormap control
-        steps_min = []
-        steps_max = []
-        range_vals_min = np.linspace(np.min(amp_db), amp_max_default, 20)
-        range_vals_max = np.linspace(amp_min_default, np.max(amp_db), 20)
-        
-        for val in range_vals_min:
-            steps_min.append(dict(method="restyle", args=[{"zmin": val}], label=f"{val:.0f}"))
-        
-        for val in range_vals_max:
-            steps_max.append(dict(method="restyle", args=[{"zmax": val}], label=f"{val:.0f}"))
-        
-        fig.update_layout(
-            title="Amplitude Heatmap (Pulse-Stacked)",
-            xaxis_title="Range Sample",
-            yaxis_title="Pulse Number",
-            height=600,
-            template='plotly_dark',
-            sliders=[
-                dict(active=10, yanchor="top", y=-0.15, xanchor="left",
-                     currentvalue=dict(prefix="Min: ", visible=True, xanchor="right"),
-                     pad=dict(b=10, t=10), len=0.42, x=0.0, steps=steps_min),
-                dict(active=10, yanchor="top", y=-0.15, xanchor="right",
-                     currentvalue=dict(prefix="Max: ", visible=True, xanchor="left"),
-                     pad=dict(b=10, t=10), len=0.42, x=1.0, steps=steps_max)
-            ]
-        )
-        workflow.add_plot(fig)
+    # Check for errors
+    plot_errors = []
+    node_errors = []
+    for key, value in context.items():
+        if isinstance(key, str):
+            if key == '_plot_error':
+                plot_errors.append(value)
+            elif key == '_node_error':
+                node_errors.append(value)
     
-    # Phase heatmap
-    phase = context.get('phase')
-    if phase is not None:
-        # Downsample in range dimension if requested
-        phase_plot = phase[:, ::downsample_factor] if downsample_factor > 1 else phase
-        
-        # Auto-downsample pulse dimension for very large heatmaps to prevent JSON serialization errors
-        # Target: ~500k data points max in heatmap (to stay under JS string limits)
-        max_heatmap_points = 500000
-        total_points = phase_plot.shape[0] * phase_plot.shape[1]
-        if total_points > max_heatmap_points:
-            downsample_pulses = int(np.ceil(np.sqrt(total_points / max_heatmap_points)))
-            phase_plot = phase_plot[::downsample_pulses, :]
-        
-        phase_min_default = float(np.percentile(phase_plot, 1))
-        phase_max_default = float(np.percentile(phase_plot, 99))
-        
-        fig = go.Figure(data=go.Heatmap(
-            z=phase_plot,
-            colorscale='HSV',
-            zmin=phase_min_default,
-            zmax=phase_max_default,
-            colorbar=dict(title="Phase (rad)", x=1.15),
-            zmid=0
-        ))
-        
-        steps_min = []
-        steps_max = []
-        range_vals_min = np.linspace(-np.pi, 0, 15)
-        range_vals_max = np.linspace(0, np.pi, 15)
-        
-        for val in range_vals_min:
-            steps_min.append(dict(method="restyle", args=[{"zmin": val}], label=f"{val:.2f}"))
-        
-        for val in range_vals_max:
-            steps_max.append(dict(method="restyle", args=[{"zmax": val}], label=f"{val:.2f}"))
-        
-        fig.update_layout(
-            title="Phase Heatmap (Pulse-Stacked)",
-            xaxis_title="Range Sample",
-            yaxis_title="Pulse Number",
-            height=600,
-            template='plotly_dark',
-            sliders=[
-                dict(active=7, yanchor="top", y=-0.15, xanchor="left",
-                     currentvalue=dict(prefix="Min: ", visible=True, xanchor="right"),
-                     pad=dict(b=10, t=10), len=0.42, x=0.0, steps=steps_min),
-                dict(active=7, yanchor="top", y=-0.15, xanchor="right",
-                     currentvalue=dict(prefix="Max: ", visible=True, xanchor="left"),
-                     pad=dict(b=10, t=10), len=0.42, x=1.0, steps=steps_max)
-            ]
-        )
-        workflow.add_plot(fig)
+    if plot_errors:
+        workflow.add_text("**⚠️ Plot Generation Errors:**")
+        for err in plot_errors:
+            workflow.add_text(f"- {err}")
     
-    # Amplitude histogram
-    amp_flat = context.get('amp_flat')
-    if amp_flat is not None:
-        hist, edges = np.histogram(amp_flat, bins=100)
-        bin_centers = (edges[:-1] + edges[1:]) / 2
-        
-        fig = go.Figure(data=go.Bar(x=bin_centers, y=hist, marker_color='cyan'))
-        fig.update_layout(
-            title="Amplitude Distribution",
-            xaxis_title="Amplitude",
-            yaxis_title="Count (log scale)",
-            yaxis_type="log",
-            height=400,
-            template='plotly_dark'
-        )
-        workflow.add_plot(fig)
+    if node_errors:
+        workflow.add_text("**❌ Node Execution Errors:**")
+        for err in node_errors:
+            workflow.add_text(f"- {err}")
     
-    # Phase histogram
-    phase_flat = context.get('phase_flat')
-    if phase_flat is not None:
-        hist, edges = np.histogram(phase_flat, bins=100)
-        bin_centers = (edges[:-1] + edges[1:]) / 2
-        
-        fig = go.Figure(data=go.Bar(x=bin_centers, y=hist, marker_color='magenta'))
-        fig.update_layout(
-            title="Phase Distribution",
-            xaxis_title="Phase (radians)",
-            yaxis_title="Count",
-            height=400,
-            template='plotly_dark'
-        )
-        workflow.add_plot(fig)
-    
-    # Tables
+    # Add statistics tables (generated by compute_statistics node)
     amplitude_stats = context.get('amplitude_stats')
     if amplitude_stats:
         workflow.add_table("Amplitude Statistics", amplitude_stats)
