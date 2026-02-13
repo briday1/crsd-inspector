@@ -9,12 +9,12 @@ import plotly.graph_objects as go
 from dagex import Graph
 
 from renderflow.workflow import Workflow
-from crsd_inspector.workflows.src.util.wrappers import (
+from crsd_inspector.workflows.util.wrappers import (
     emit_progress, wrap_with_timing, make_window, downsample_heatmap, safe_plot_wrapper
 )
-from crsd_inspector.workflows.src.proc import range_doppler_nodes as nodes
-from crsd_inspector.workflows.src.plot import range_doppler_plots as plots
-from crsd_inspector.workflows.src.summary import range_doppler_summary as summary
+from crsd_inspector.workflows.proc import range_doppler_nodes as nodes
+from crsd_inspector.workflows.plot import range_doppler_plots as plots
+from crsd_inspector.workflows.summary import range_doppler_summary as summary
 
 
 # Create workflow instance

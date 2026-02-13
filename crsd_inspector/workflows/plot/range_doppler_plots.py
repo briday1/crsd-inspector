@@ -7,7 +7,7 @@ Each function takes inputs from the graph context and returns plotly figures.
 
 import numpy as np
 import plotly.graph_objects as go
-from crsd_inspector.workflows.src.util.wrappers import downsample_heatmap
+from crsd_inspector.workflows.util.wrappers import downsample_heatmap
 
 
 def determine_data_type(inputs):

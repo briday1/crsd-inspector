@@ -14,17 +14,10 @@ uv pip install -e .
 ## Run
 
 ```bash
-# Provider-scoped CLI (delegates to renderflow)
-crsd-inspector list
-crsd-inspector show-params --workflow signal_analysis
-crsd-inspector execute --workflow signal_analysis --init crsd_directory=examples
-
-# GUI (renderflow-backed)
-crsd-inspector-gui
-
-# Equivalent direct renderflow calls
-renderflow run --provider crsd-inspector
 renderflow list-workflows --provider crsd-inspector
+renderflow show-params --provider crsd-inspector --workflow signal_analysis
+renderflow execute --provider crsd-inspector --workflow signal_analysis --init crsd_directory=examples
+renderflow run --provider crsd-inspector
 ```
 
 ## Architecture
@@ -32,8 +25,6 @@ renderflow list-workflows --provider crsd-inspector
 `crsd_inspector` contains:
 - `workflows/`: domain workflow definitions (`run_workflow` + `workflow.params`)
 - `renderflow.py`: minimal provider contract (`initialize`, `INIT_PARAMS`, `WORKFLOWS_PACKAGE`)
-- `cli.py`: thin wrapper over `renderflow.cli`
-- `gui.py`: GUI bridge to renderflow Streamlit renderer
 
 The package no longer defines its own renderer/runtime layer.
 
