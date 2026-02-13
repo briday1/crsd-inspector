@@ -6,7 +6,7 @@ Generates amplitude/phase heatmaps, histograms, and statistics
 import numpy as np
 from dagex import Graph
 import plotly.graph_objects as go
-from crsd_inspector.workflows.workflow import Workflow
+from renderflow.workflow import Workflow
 from crsd_inspector.workflows.src.proc import signal_analysis_nodes as nodes
 from crsd_inspector.workflows.src.plot import signal_analysis_plots as plots
 from crsd_inspector.workflows.src.summary import signal_analysis_summary as summary

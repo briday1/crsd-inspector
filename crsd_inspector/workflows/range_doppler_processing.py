@@ -8,7 +8,7 @@ import numpy as np
 import plotly.graph_objects as go
 from dagex import Graph
 
-from crsd_inspector.workflows.workflow import Workflow
+from renderflow.workflow import Workflow
 from crsd_inspector.workflows.src.util.wrappers import (
     emit_progress, wrap_with_timing, make_window, downsample_heatmap, safe_plot_wrapper
 )

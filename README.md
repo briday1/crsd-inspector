@@ -1,9 +1,6 @@
 # CRSD Inspector
 
-CRSD Inspector is a CRSD analysis package that exposes:
-- domain CLI commands (`crsd-inspector`)
-- workflow/provider definitions for `renderflow`
-- a GUI launcher (`crsd-inspector-gui`) that delegates rendering to `renderflow`
+CRSD Inspector defines CRSD workflows and uses `renderflow` for runtime/rendering.
 
 ## Install
 
@@ -17,38 +14,33 @@ uv pip install -e .
 ## Run
 
 ```bash
-# Domain CLI
-crsd-inspector --help
+# Provider-scoped CLI (delegates to renderflow)
+crsd-inspector list
+crsd-inspector show-params --workflow signal_analysis
+crsd-inspector execute --workflow signal_analysis --init crsd_directory=examples
 
 # GUI (renderflow-backed)
 crsd-inspector-gui
-```
 
-You can also launch renderflow directly:
-
-```bash
+# Equivalent direct renderflow calls
 renderflow run --provider crsd-inspector
+renderflow list-workflows --provider crsd-inspector
 ```
 
 ## Architecture
 
 `crsd_inspector` contains:
-- `cli.py`: domain CLI
-- `gui.py`: GUI bridge API (calls renderflow Streamlit renderer)
-- `app_definition.py`: renderflow provider contract
-- `workflows/`: analysis workflows
+- `workflows/`: domain workflow definitions (`run_workflow` + `workflow.params`)
+- `renderflow.py`: minimal provider contract (`initialize`, `INIT_PARAMS`, `WORKFLOWS_PACKAGE`)
+- `cli.py`: thin wrapper over `renderflow.cli`
+- `gui.py`: GUI bridge to renderflow Streamlit renderer
 
-This repo no longer contains an in-repo renderer/runtime implementation.
+The package no longer defines its own renderer/runtime layer.
 
 ## Provider Registration
 
-`pyproject.toml` registers this package as a renderflow provider:
+`pyproject.toml` registers this package under:
 
 `[project.entry-points."renderflow.providers"]`
 
-`crsd-inspector = "crsd_inspector.app_definition:get_app_spec"`
-
-## Notes
-
-- CRSD reading/writing is through `sarkit`.
-- Workflow execution/processing uses existing workflow modules under `crsd_inspector/workflows/`.
+`crsd-inspector = "crsd_inspector.renderflow:get_app_spec"`

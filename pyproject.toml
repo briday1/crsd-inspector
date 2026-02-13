@@ -34,8 +34,6 @@ dependencies = [
     "matplotlib>=3.7.0",
     "plotly>=5.18.0",
     "lxml>=4.9.0",
-    "click>=8.0.0",
-    "rich>=13.0.0",
 ]
 
 [project.optional-dependencies]
@@ -50,7 +48,7 @@ crsd-inspector = "crsd_inspector.cli:main"
 crsd-inspector-gui = "crsd_inspector.gui:main"
 
 [project.entry-points."renderflow.providers"]
-crsd-inspector = "crsd_inspector.app_definition:get_app_spec"
+crsd-inspector = "crsd_inspector.renderflow:get_app_spec"
 
 [project.urls]
 Homepage = "https://github.com/yourusername/crsd-inspector"
