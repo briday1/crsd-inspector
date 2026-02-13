@@ -43,6 +43,9 @@ dev = [
     "ruff>=0.1.0",
 ]
 
+[project.scripts]
+crsd-inspector = "crsd_inspector.cli:main"
+
 [project.entry-points."renderflow.providers"]
 crsd-inspector = "crsd_inspector.renderflow:get_app_spec"
 

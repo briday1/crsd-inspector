@@ -14,17 +14,16 @@ uv pip install -e .
 ## Run
 
 ```bash
-renderflow list-workflows --provider crsd-inspector
-renderflow show-params --provider crsd-inspector --workflow signal_analysis
+crsd-inspector list
+crsd-inspector show-params --workflow signal_analysis
 
 # Workflow-only params (no separate initialization stage)
-renderflow execute \
-  --provider crsd-inspector \
+crsd-inspector execute \
   --workflow signal_analysis \
   --param crsd_directory=examples \
   --param crsd_file=uniform_prf_1target_1ch_external.crsd
 
-renderflow run --provider crsd-inspector
+crsd-inspector run
 ```
 
 ## Architecture
