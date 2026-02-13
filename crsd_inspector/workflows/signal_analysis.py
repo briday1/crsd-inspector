@@ -7,10 +7,11 @@ import numpy as np
 from dagex import Graph
 import plotly.graph_objects as go
 from renderflow.workflow import Workflow
+from renderflow.progress import wrap_with_timing
 from crsd_inspector.workflows.proc import signal_analysis_nodes as nodes
 from crsd_inspector.workflows.plot import signal_analysis_plots as plots
 from crsd_inspector.workflows.summary import signal_analysis_summary as summary
-from crsd_inspector.workflows.util.wrappers import safe_plot_wrapper, wrap_with_timing
+from crsd_inspector.workflows.util.wrappers import safe_plot_wrapper
 from crsd_inspector.workflows.util.input_loader import default_crsd_param_specs, load_workflow_inputs
 
 # Create workflow instance
