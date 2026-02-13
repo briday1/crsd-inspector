@@ -11,6 +11,7 @@ from crsd_inspector.workflows.proc import signal_analysis_nodes as nodes
 from crsd_inspector.workflows.plot import signal_analysis_plots as plots
 from crsd_inspector.workflows.summary import signal_analysis_summary as summary
 from crsd_inspector.workflows.util.wrappers import safe_plot_wrapper, wrap_with_timing
+from crsd_inspector.workflows.util.input_loader import default_crsd_param_specs, load_workflow_inputs
 
 # Create workflow instance
 workflow = Workflow(
@@ -21,6 +22,7 @@ workflow = Workflow(
 
 # Workflow parameters
 workflow.params = {
+    **default_crsd_param_specs(include_tx=False),
     'prf_hz': {
         'type': 'number',
         'label': 'PRF (Hz)',
@@ -50,7 +52,7 @@ workflow.params = {
 }
 
 
-def run_workflow(signal_data, metadata=None, **kwargs):
+def run_workflow(signal_data=None, metadata=None, **kwargs):
     """Run the signal analysis workflow and return formatted results"""
     workflow.clear()  # Clear any previous results
     
@@ -58,7 +60,14 @@ def run_workflow(signal_data, metadata=None, **kwargs):
     if metadata is None:
         metadata = {}
     metadata.update(kwargs)
-    
+
+    # Workflow-only mode: load CRSD inputs from workflow params when needed.
+    if signal_data is None:
+        signal_data, loaded_metadata = load_workflow_inputs(metadata, include_tx=False)
+        merged_metadata = dict(loaded_metadata)
+        merged_metadata.update(metadata)
+        metadata = merged_metadata
+
     # Create and execute graph
     graph = _create_graph(signal_data, metadata)
     dag = graph.build()

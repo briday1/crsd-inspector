@@ -16,7 +16,14 @@ uv pip install -e .
 ```bash
 renderflow list-workflows --provider crsd-inspector
 renderflow show-params --provider crsd-inspector --workflow signal_analysis
-renderflow execute --provider crsd-inspector --workflow signal_analysis --init crsd_directory=examples
+
+# Workflow-only params (no separate initialization stage)
+renderflow execute \
+  --provider crsd-inspector \
+  --workflow signal_analysis \
+  --param crsd_directory=examples \
+  --param crsd_file=uniform_prf_1target_1ch_external.crsd
+
 renderflow run --provider crsd-inspector
 ```
 
@@ -24,9 +31,10 @@ renderflow run --provider crsd-inspector
 
 `crsd_inspector` contains:
 - `workflows/`: domain workflow definitions (`run_workflow` + `workflow.params`)
-- `renderflow.py`: minimal provider contract (`initialize`, `INIT_PARAMS`, `WORKFLOWS_PACKAGE`)
+- `workflows/util/input_loader.py`: shared CRSD file loading from workflow params
+- `renderflow.py`: minimal provider contract (`APP_NAME`, `WORKFLOWS_PACKAGE`)
 
-The package no longer defines its own renderer/runtime layer.
+The package no longer defines its own renderer/runtime layer and does not use a separate initialization stage.
 
 ## Provider Registration
 

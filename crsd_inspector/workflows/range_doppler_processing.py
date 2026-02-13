@@ -15,6 +15,7 @@ from crsd_inspector.workflows.util.wrappers import (
 from crsd_inspector.workflows.proc import range_doppler_nodes as nodes
 from crsd_inspector.workflows.plot import range_doppler_plots as plots
 from crsd_inspector.workflows.summary import range_doppler_summary as summary
+from crsd_inspector.workflows.util.input_loader import default_crsd_param_specs, load_workflow_inputs
 
 
 # Create workflow instance
@@ -26,6 +27,7 @@ workflow = Workflow(
 
 # Workflow parameters
 workflow.params = {
+    **default_crsd_param_specs(include_tx=True),
     'window_type': {
         'label': 'Slow-Time Window',
         'type': 'dropdown',
@@ -106,13 +108,21 @@ workflow.params = {
 # WORKFLOW EXECUTION
 # ============================================================================
 
-def run_workflow(signal_data, metadata=None, **kwargs):
+def run_workflow(signal_data=None, metadata=None, **kwargs):
     """Execute pulse extraction workflow using dagex Graph"""
     workflow.clear()
     
     if metadata is None:
         metadata = {}
-    
+    metadata.update(kwargs)
+
+    # Workflow-only mode: load CRSD inputs from workflow params when needed.
+    if signal_data is None:
+        signal_data, loaded_metadata = load_workflow_inputs(metadata, include_tx=True)
+        merged_metadata = dict(loaded_metadata)
+        merged_metadata.update(metadata)
+        metadata = merged_metadata
+
     tx_wfm = metadata.get('tx_wfm')
     if tx_wfm is None:
         workflow.add_text("❌ **Error:** TX waveform is required for Range-Doppler Processing workflow. Please select or provide a TX CRSD file.")
