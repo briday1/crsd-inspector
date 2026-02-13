@@ -7,8 +7,7 @@ Modular matched filter processing for continuous staggered-PRF radar data.
 import numpy as np
 import plotly.graph_objects as go
 from dagex import Graph
-from renderflow import Workflow
-from renderflow.progress import emit_progress, wrap_with_timing
+from renderflow import Workflow, emit_progress, wrap_with_timing
 from crsd_inspector.workflows.util.wrappers import (
     make_window, 
     downsample_heatmap, 
